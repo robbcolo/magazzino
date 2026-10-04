@@ -193,12 +193,14 @@ a { color: var(--accent); }
 .page-head .sub { color: var(--ink-2); margin-top: 4px; font-size: 16px; }
 .page-head .grow { flex: 1; min-width: 200px; }
 .page-head .head-actions { display: flex; gap: 10px; align-items: center; }
-.me-mini { display: none; border: 0; background: none; padding: 0; }
+.sync-pill { display: none; width: 44px; height: 44px; border-radius: 22px; border: 0; place-items: center; background: var(--surface); box-shadow: var(--shadow); color: var(--ok); }
+.sync-pill.sync-off { color: var(--ink-3); }
+.sync-pill.sync-busy { color: var(--in); }
 @media (max-width: 699px) {
   .page-head { position: relative; }
   .page-head h1 { font-size: 30px; }
   .page-head .grow { padding-right: 52px; }
-  .me-mini { display: block; position: absolute; top: 2px; right: 0; }
+  .sync-pill { display: grid; position: absolute; top: 2px; right: 0; }
   .page-head .head-actions { width: 100%; }
   .page-head .head-actions .btn { flex: 1; padding: 0 12px; }
 }
@@ -733,3 +735,30 @@ select.input { background-image: linear-gradient(45deg, transparent 50%, var(--i
   .label b { display: block; font-size: 10.5pt; line-height: 1.2; }
   .label span { display: block; font-size: 8.5pt; color: #444; margin-top: 1mm; }
 }
+
+/* ---------- Sincronizzazione ---------- */
+.sync-card {
+  display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 16px; width: 100%;
+  background: var(--surface); border: 0; box-shadow: var(--shadow); text-align: left; color: var(--ok);
+}
+.sync-card .sync-text { display: block; min-width: 0; color: var(--ink); }
+.sync-card .sync-text b { display: block; font-size: 15.5px; }
+.sync-card .sync-text span { display: block; font-size: 13px; color: var(--ink-3); line-height: 1.3; }
+.sync-card.sync-off { color: var(--ink-3); }
+.sync-card.sync-busy { color: var(--in); }
+.sync-dot { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; flex: none; background: var(--ok-soft); color: var(--ok-ink); }
+.sync-dot.sync-off { background: var(--surface-3); color: var(--ink-3); }
+.sync-dot.sync-busy { background: var(--in-soft); color: var(--in-ink); }
+@media (max-width: 1099px) and (min-width: 700px) {
+  .sync-card { flex-direction: column; gap: 4px; padding: 10px 4px; text-align: center; }
+  .sync-card .sync-text span { display: none; }
+  .sync-card .sync-text b { font-size: 11.5px; }
+}
+.tool-ic { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; flex: none; background: var(--accent-soft); color: var(--accent); }
+.mv-ic { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; flex: none; background: var(--surface-3); color: var(--ink-2); }
+.mv-ic.mv-out { background: var(--accent-soft); color: var(--accent); }
+.mv-ic.mv-in { background: var(--ok-soft); color: var(--ok-ink); }
+.mv-ic.mv-warn { background: var(--order-soft); color: var(--order-ink); }
+.sup-edit { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; padding: 8px 10px; align-items: center; }
+.sup-edit + .sup-edit { border-top: 1px solid var(--line-2); }
+@media (max-width: 699px) { .sup-edit { grid-template-columns: 1fr auto; } .sup-edit input:nth-child(2) { grid-column: 1; grid-row: 2; } .sup-edit button { grid-row: 1 / span 2; grid-column: 2; } }

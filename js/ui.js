@@ -1,7 +1,7 @@
 // Componenti condivisi dell'interfaccia
 import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js';
 import { ICONS } from './icons.js';
-import { S, emit, category, user } from './store.js';
+import { S, emit, category } from './store.js';
 import { STATUS, DAY, startOfDay } from './logic.js';
 
 // ---------- Stato dell'interfaccia ----------
@@ -207,10 +207,20 @@ export function Toggle({ checked, onChange, label, hint }) {
   </label>`;
 }
 
-export function NumberInput({ value, onInput, min = 0, step = 1, placeholder, inputmode = 'decimal', id, autofocus }) {
-  return html`<input id=${id} class="input num" type="text" inputmode=${inputmode} pattern="[0-9]*[.,]?[0-9]*" value=${value ?? ''} placeholder=${placeholder}
-    autoFocus=${autofocus}
-    onInput=${(e) => { const v = e.target.value.replace(',', '.'); onInput(v === '' ? null : Math.max(min, +v || 0)); }} />`;
+/** Campo numerico che accetta la virgola e non "mangia" i decimali mentre si scrive */
+export function NumberInput({ value, onInput, min = 0, placeholder, inputmode = 'decimal', id, autofocus }) {
+  const fmt = (v) => (v == null || Number.isNaN(v) ? '' : String(v).replace('.', ','));
+  const parse = (t) => {
+    const s = String(t).trim().replace(/\s/g, '').replace(',', '.');
+    if (s === '' || s === '.') return null;
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? Math.max(min, n) : null;
+  };
+  const [text, setText] = useState(fmt(value));
+  useEffect(() => { if (parse(text) !== (value ?? null)) setText(fmt(value)); }, [value]);
+  return html`<input id=${id} class="input num" type="text" inputmode=${inputmode} value=${text} placeholder=${placeholder}
+    autoFocus=${autofocus} autocomplete="off"
+    onInput=${(e) => { const t = e.target.value.replace(/[^0-9.,]/g, ''); setText(t); onInput(parse(t)); }} />`;
 }
 
 export function Stepper({ value, onChange, min = 0, big = false, unit }) {
@@ -366,5 +376,4 @@ export async function photoToDataURL(file, max = 480) {
   } finally { URL.revokeObjectURL(url); }
 }
 
-export const userName = (id) => user(id)?.name || 'Qualcuno';
 export { STATUS, S };

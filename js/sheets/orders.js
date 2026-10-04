@@ -1,7 +1,7 @@
 import { html, useState } from '../../vendor/preact-htm.js';
-import { S, derived, supplier, user, me, order, product, createOrder, receiveOrder, cancelOrder, closeOrder, updateOrder } from '../store.js';
+import { S, derived, supplier, order, product, createOrder, receiveOrder, cancelOrder, closeOrder, updateOrder } from '../store.js';
 import {
-  SHEETS, Sheet, Icon, Avatar, Field, Stepper, Empty, openSheet, toast, confirmDialog, haptic, fmtEuro, fmtQty, fmtDate, relDay,
+  SHEETS, Sheet, Icon, Field, Stepper, Empty, openSheet, toast, confirmDialog, haptic, fmtEuro, fmtQty, fmtDate, relDay,
   unitFor, plural, NumberInput,
 } from '../ui.js';
 import { waNumber } from '../shared.js';
@@ -11,9 +11,8 @@ import { orderText, isoDate, parseISO, addWorkDays, startOfDay, DAY } from '../l
 function OrderComposeSheet({ supplierId, close }) {
   const g = derived().groups.find((x) => (x.supplierId || '') === (supplierId || ''));
   const s = supplier(supplierId);
-  const u = me();
   const items = g?.items || [];
-  const [text, setText] = useState(() => orderText({ supplier: s, items, settings: S.settings, user: u }));
+  const [text, setText] = useState(() => orderText({ supplier: s, items, settings: S.settings }));
   const lead = s?.leadDays ?? S.settings.defaultLeadDays ?? 3;
   const [expected, setExpected] = useState(isoDate(addWorkDays(Date.now(), lead, S.settings.workDays)));
   const [sent, setSent] = useState(false);
@@ -105,7 +104,6 @@ function ReceiveSheet({ orderId, close }) {
 function OrderViewSheet({ orderId, close }) {
   const o = order(orderId);
   if (!o) return null;
-  const by = user(o.orderedBy);
   const open = o.status === 'ordinato' || o.status === 'parziale';
   const statusLabel = { ordinato: 'In arrivo', parziale: 'Arrivato in parte', arrivato: o.closedPartial ? 'Chiuso (arrivato in parte)' : 'Arrivato', annullato: 'Annullato' }[o.status];
   return html`<${Sheet} title=${`Ordine a ${o.supplierName}`} sub=${`${statusLabel}, ${fmtDate(o.createdAt, { day: 'numeric', month: 'long', year: 'numeric' })}`} close=${close} wide
@@ -115,7 +113,7 @@ function OrderViewSheet({ orderId, close }) {
       <span class="grow"></span>
       <button class="btn primary" onClick=${() => { close(); openSheet('receive', { orderId: o.id }); }}><${Icon} n="package-import" s="20" />Ricevi merce</button>` : null}>
     <div class="facts" style="margin-top:0">
-      <div class="fact"><span>Ordinato da</span><b style="display:flex;gap:8px;align-items:center"><${Avatar} u=${by} size=${24} />${by?.name || '—'}</b><small>${fmtDate(o.createdAt, { weekday: 'long', day: 'numeric', month: 'long' })}</small></div>
+      <div class="fact"><span>Ordinato</span><b>${relDay(o.createdAt)}</b><small>${fmtDate(o.createdAt, { weekday: 'long', day: 'numeric', month: 'long' })}</small></div>
       <div class="fact"><span>${o.receivedAt ? 'Arrivato' : 'Arrivo previsto'}</span><b>${o.receivedAt ? fmtDate(o.receivedAt, { day: 'numeric', month: 'long' }) : o.expectedAt ? relDay(o.expectedAt) : '–'}</b>
         ${open && html`<small><input class="input" type="date" style="min-height:40px;padding:6px 10px;margin-top:6px;font-size:15px" value=${o.expectedAt ? isoDate(o.expectedAt) : ''} onChange=${(e) => updateOrder(o.id, { expectedAt: parseISO(e.target.value) })} aria-label="Cambia data prevista" /></small>`}
       </div>

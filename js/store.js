@@ -1,21 +1,24 @@
-// Stato dell'app, azioni e salvataggio.
-import * as db from './db.js';
+// Stato dell'app e azioni. I dati arrivano da Firestore (cloud.js) e ogni modifica viene
+// applicata subito qui (per una risposta immediata) e inviata al cloud.
+import * as cloud from './cloud.js';
 import {
   DEFAULT_SETTINGS, DAY, computeProduct, incomingMap, buildOrderList, takeFromLots, trimLots,
-  applyLotDelta, startOfDay, norm, isoDate, priceFor,
+  startOfDay, norm, isoDate, priceFor,
 } from './logic.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '2.0.0';
 
 export const S = {
-  ready: false,
-  users: [], products: [], suppliers: [], categories: [], movements: [], orders: [],
+  phase: 'boot',        // boot | config | login | loading | ready
+  products: [], suppliers: [], categories: [], movements: [], olderMovements: [], orders: [],
   settings: { ...DEFAULT_SETTINGS },
+  settingsExists: false,
   orderList: {},
-  session: { userId: null, lastActive: 0 },
-  v: 0,   // cambia a ogni modifica (anche di interfaccia)
-  dv: 0,  // cambia solo quando cambiano i dati
+  loaded: {},
+  loadingSince: 0,
+  v: 0, dv: 0,
 };
+const COLLECTIONS = ['products', 'suppliers', 'categories', 'orders', 'log', 'settings', 'orderList'];
 
 // ---------- Notifica dei cambiamenti ----------
 const listeners = new Set();
@@ -39,7 +42,6 @@ function M() {
       dv: S.dv,
       p: new Map(S.products.map((x) => [x.id, x])),
       s: new Map(S.suppliers.map((x) => [x.id, x])),
-      u: new Map(S.users.map((x) => [x.id, x])),
       c: new Map(S.categories.map((x) => [x.id, x])),
       o: new Map(S.orders.map((x) => [x.id, x])),
       code: new Map(S.products.flatMap((p) => (p.codes || []).map((k) => [k, p.id]))),
@@ -49,13 +51,9 @@ function M() {
 }
 export const product = (id) => M().p.get(id);
 export const supplier = (id) => M().s.get(id);
-export const user = (id) => M().u.get(id);
 export const category = (id) => M().c.get(id);
 export const order = (id) => M().o.get(id);
 export const productByCode = (key) => { const id = M().code.get(key); return id ? product(id) : null; };
-export const me = () => user(S.session.userId);
-export const isAdmin = () => me()?.role === 'admin';
-export const respFor = (p) => p.respId || category(p.catId)?.respId || null;
 
 // ---------- Dati calcolati ----------
 let der = { key: '' };
@@ -89,67 +87,83 @@ export function derived() {
 }
 export const dp = (id) => derived().map.get(id);
 
-// ---------- Caricamento ----------
-export async function load() {
-  await db.open();
-  const [users, products, suppliers, categories, movements, orders, kv] = await Promise.all(db.STORES.map((s) => db.getAll(s)));
-  Object.assign(S, { users, products, suppliers, categories, movements, orders });
-  S.movements.sort((a, b) => a.ts - b.ts);
-  const kvm = Object.fromEntries(kv.map((k) => [k.id, k.data]));
-  S.settings = { ...DEFAULT_SETTINGS, ...(kvm.settings || {}) };
-  S.orderList = kvm.orderList || {};
-  S.session = kvm.session || { userId: null, lastActive: 0 };
-  if (S.session.userId && !user(S.session.userId)) S.session.userId = null;
-  checkLock();
-  S.ready = true;
-  db.requestPersistence();
-  touch();
+// ---------- Avvio ----------
+export function boot() {
+  const cfg = cloud.readConfig();
+  if (!cfg) { S.phase = 'config'; emit(); return; }
+  S.configSource = cfg.source;
+  try {
+    cloud.init(cfg, {
+      onAuth(user) {
+        S.account = user;
+        S.loaded = {};
+        if (!user) { S.phase = 'login'; resetData(); emit(); return; }
+        S.phase = 'loading';
+        S.loadingSince = Date.now();
+        emit();
+      },
+      onCollection(name, docs, meta) {
+        if (name === 'log') {
+          S.movements = docs.flatMap((d) => d.m.map((m) => ({ ...m, day: m.day || d.day }))).sort((a, b) => a.ts - b.ts);
+        } else {
+          S[name] = docs;
+        }
+        markLoaded(name, meta);
+        touch();
+      },
+      onDoc(name, data, meta) {
+        if (name === 'settings') {
+          // un documento assente dalla sola copia locale non basta per dire che lo studio è nuovo
+          if (!data && meta.fromCache) { markLoaded(name, meta, false); emit(); return; }
+          S.settingsExists = !!data;
+          S.settings = { ...DEFAULT_SETTINGS, ...(data || {}) };
+        } else if (name === 'orderList') {
+          S.orderList = data?.items || {};
+        }
+        markLoaded(name, meta);
+        touch();
+      },
+      onWriteError(what, e) {
+        S.lastWriteError = { what, code: e.code, at: Date.now() };
+        emit();
+      },
+      onError(name, e) {
+        S.lastListenError = { name, code: e.code, at: Date.now() };
+        emit();
+      },
+    });
+  } catch (e) {
+    console.error(e);
+    S.phase = 'config';
+    S.configError = 'La configurazione di Firebase non è valida.';
+    emit();
+  }
 }
+function markLoaded(name, meta, ok = true) {
+  if (ok) S.loaded[name] = true;
+  if (S.phase === 'loading' && COLLECTIONS.every((c) => S.loaded[c])) S.phase = 'ready';
+}
+function resetData() {
+  Object.assign(S, { products: [], suppliers: [], categories: [], movements: [], olderMovements: [], orders: [], settings: { ...DEFAULT_SETTINGS }, settingsExists: false, orderList: {} });
+  S.dv++;
+}
+export const syncState = () => ({ pending: cloud.C.pending, online: navigator.onLine, serverSeen: cloud.C.serverSeen, lastServerAt: cloud.C.lastServerAt });
+export { cloud };
 
-const saveKV = (id, data) => db.put('kv', { id, data });
-
-// ---------- Impostazioni e sessione ----------
+// ---------- Impostazioni ----------
 export function setSettings(patch) {
   S.settings = { ...S.settings, ...patch };
-  saveKV('settings', S.settings);
+  S.settingsExists = true;
+  cloud.mergeDoc('meta', 'settings', patch);
   touch();
 }
 
-export function login(userId) {
-  S.session = { userId, lastActive: Date.now() };
-  saveKV('session', S.session);
-  emit();
-}
-export function logout() {
-  S.session = { userId: null, lastActive: 0 };
-  saveKV('session', S.session);
-  emit();
-}
-let lastSaved = 0;
-export function ping() {
-  if (!S.session.userId) return;
-  S.session.lastActive = Date.now();
-  if (Date.now() - lastSaved > 20000) { lastSaved = Date.now(); saveKV('session', S.session); }
-}
-export function checkLock() {
-  const mins = S.settings.lockMinutes;
-  if (!S.session.userId || !mins) return false;
-  if (Date.now() - (S.session.lastActive || 0) > mins * 60e3) { logout(); return true; }
-  return false;
-}
-
-export function pinHash(userId, pin) {
-  // hash locale (FNV-1a): il PIN serve a evitare scambi di profilo, non è una protezione forte
-  let h = 0x811c9dc5;
-  for (const ch of `${userId}:${pin}:magazzino`) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
-  return h.toString(16);
-}
-
-// ---------- Registro attività ----------
+// ---------- Registro attività (raggruppato per giorno in Firestore) ----------
 function log(m) {
-  const mv = { id: uid(), ts: Date.now(), userId: S.session.userId, ...m };
+  const ts = Date.now();
+  const mv = cloud.clean({ id: uid(), ts, day: cloud.dayKey(ts), ...m });
   S.movements.push(mv);
-  db.put('movements', mv);
+  cloud.appendLog(mv);
   return mv;
 }
 
@@ -157,13 +171,14 @@ function log(m) {
 /**
  * type: 'scarico' (amount = unità prese), 'carico' (amount = unità aggiunte),
  *       'rettifica' (amount = nuova quantità contata), 'scarto' (opts.lotId = lotto da eliminare)
+ * Le quantità si inviano come incrementi: se due dispositivi registrano insieme, contano entrambi.
  */
 export function stockMove(pid, type, amount, opts = {}) {
   const p = product(pid);
   if (!p) return null;
   const before = Math.max(0, p.qty || 0);
   let lots = p.lots || [];
-  let delta = 0, lotDelta = [];
+  let delta = 0, lotDelta = [], newLots = [];
   if (type === 'scarico') {
     delta = -Math.min(amount, before);
     const r = takeFromLots(lots, -delta);
@@ -172,10 +187,10 @@ export function stockMove(pid, type, amount, opts = {}) {
     delta = amount;
     if (opts.lot || opts.exp) {
       const lotName = (opts.lot || '').trim();
-      let l = lots.find((x) => (x.lot || '') === lotName && (x.exp || '') === (opts.exp || ''));
       lots = lots.map((x) => ({ ...x }));
-      if (l) { l = lots.find((x) => x.id === l.id); l.qty += amount; }
-      else { l = { id: uid(), lot: lotName, exp: opts.exp || '', qty: amount }; lots.push(l); }
+      let l = lots.find((x) => (x.lot || '') === lotName && (x.exp || '') === (opts.exp || ''));
+      if (l) l.qty += amount;
+      else { l = { id: uid(), lot: lotName, exp: opts.exp || '', qty: amount }; lots.push(l); newLots.push(l.id); }
       lotDelta = [{ id: l.id, lot: l.lot, exp: l.exp, d: amount }];
     }
   } else if (type === 'rettifica') {
@@ -188,11 +203,18 @@ export function stockMove(pid, type, amount, opts = {}) {
     lots = lots.filter((x) => x.id !== l.id);
     lotDelta = [{ id: l.id, lot: l.lot, exp: l.exp, d: -l.qty }];
   }
-  if (delta === 0 && type !== 'rettifica') return null;
+  if (delta === 0 && !lotDelta.length) return null;
+  // risposta immediata in locale
   p.qty = before + delta;
   p.lots = lots;
   p.updatedAt = Date.now();
-  db.put('products', p);
+  // invio al cloud come incrementi
+  const fields = { qty: cloud.inc(delta), updatedAt: p.updatedAt };
+  for (const d of lotDelta) {
+    fields[`lots.${d.id}.qty`] = cloud.inc(d.d);
+    if (type === 'carico') { fields[`lots.${d.id}.lot`] = d.lot || ''; fields[`lots.${d.id}.exp`] = d.exp || ''; }
+  }
+  cloud.patchDoc('products', pid, fields);
   const mv = log({
     productId: pid, pname: p.name, unit: p.unit, type, qty: delta, before, after: p.qty, lotDelta,
     lot: opts.lot || (lotDelta.length === 1 ? lotDelta[0].lot : undefined),
@@ -209,44 +231,56 @@ export function undoMove(mvId) {
   const p = product(mv.productId);
   if (p && typeof mv.qty === 'number') {
     p.qty = Math.max(0, (p.qty || 0) - mv.qty);
-    p.lots = applyLotDelta(p.lots || [], mv.lotDelta || [], -1);
-    db.put('products', p);
+    const fields = { qty: cloud.inc(-mv.qty), updatedAt: Date.now() };
+    const lots = (p.lots || []).map((l) => ({ ...l }));
+    for (const d of mv.lotDelta || []) {
+      fields[`lots.${d.id}.qty`] = cloud.inc(-d.d);
+      fields[`lots.${d.id}.lot`] = d.lot || '';
+      fields[`lots.${d.id}.exp`] = d.exp || '';
+      let l = lots.find((x) => x.id === d.id);
+      if (!l) { l = { id: d.id, lot: d.lot, exp: d.exp, qty: 0 }; lots.push(l); }
+      l.qty -= d.d;
+    }
+    p.lots = lots.filter((l) => l.qty > 0);
+    cloud.patchDoc('products', p.id, fields);
   }
   S.movements.splice(i, 1);
-  db.del('movements', mvId);
+  cloud.removeLog(mv);
   touch();
 }
 
 // ---------- Prodotti ----------
+const EDITABLE = ['name', 'brand', 'catId', 'unit', 'packSize', 'packLabel', 'min', 'max', 'location', 'supplierId', 'supplierCode', 'price', 'alts', 'codes', 'trackExpiry', 'leadDays', 'note', 'photo'];
+
 export function saveProduct(data) {
   const now = Date.now();
   if (!data.id) {
-    const p = {
-      id: uid(), name: '', brand: '', catId: S.categories[0]?.id || null, unit: 'pz', packSize: 1, packLabel: 'confezione',
-      qty: 0, min: 0, max: null, location: '', respId: null, supplierId: null, supplierCode: '', price: null, alts: [],
-      codes: [], trackExpiry: false, lots: [], leadDays: null, note: '', photo: null,
-      ...data, createdAt: now, updatedAt: now,
-    };
-    p.id = uid();
     const initial = Math.max(0, +data.qty || 0);
-    p.qty = initial;
+    const p = {
+      name: '', brand: '', catId: S.categories[0]?.id || null, unit: 'pz', packSize: 1, packLabel: 'confezione',
+      min: 0, max: null, location: '', supplierId: null, supplierCode: '', price: null, alts: [],
+      codes: [], trackExpiry: false, leadDays: null, note: '', photo: null,
+      ...Object.fromEntries(Object.entries(data).filter(([k]) => EDITABLE.includes(k) || k === 'demo')),
+      id: uid(), qty: initial, lots: [], createdAt: now, updatedAt: now,
+    };
     if (initial && (data.firstLot || data.firstExp)) p.lots = [{ id: uid(), lot: data.firstLot || '', exp: data.firstExp || '', qty: initial }];
-    delete p.firstLot; delete p.firstExp;
     for (const k of p.codes) removeCodeElsewhere(k, p.id);
     S.products.push(p);
-    db.put('products', p);
+    cloud.putDoc('products', p.id, p);
     log({ productId: p.id, pname: p.name, unit: p.unit, type: 'nuovo', qty: initial, before: 0, after: initial });
     touch();
     return p;
   }
   const p = product(data.id);
   if (!p) return null;
-  const { qty, lots, firstLot, firstExp, ...rest } = data;
-  Object.assign(p, rest, { updatedAt: now });
+  const fields = { updatedAt: now };
+  for (const k of EDITABLE) if (k in data) { p[k] = data[k]; fields[k] = data[k] ?? null; }
+  for (const lid of p._zeroLots || []) fields[`lots.${lid}`] = cloud.del(); // pulizia dei lotti esauriti
+  p._zeroLots = [];
   for (const k of p.codes || []) removeCodeElsewhere(k, p.id);
-  db.put('products', p);
+  cloud.patchDoc('products', p.id, fields);
   const last = S.movements[S.movements.length - 1];
-  if (!(last && last.type === 'modifica' && last.productId === p.id && last.userId === S.session.userId && now - last.ts < 10 * 60e3)) {
+  if (!(last && last.type === 'modifica' && last.productId === p.id && now - last.ts < 10 * 60e3)) {
     log({ productId: p.id, pname: p.name, type: 'modifica' });
   }
   touch();
@@ -257,33 +291,31 @@ function removeCodeElsewhere(key, keepId) {
   for (const o of S.products) {
     if (o.id !== keepId && o.codes?.includes(key)) {
       o.codes = o.codes.filter((k) => k !== key);
-      db.put('products', o);
+      cloud.patchDoc('products', o.id, { codes: o.codes });
     }
   }
 }
-
 export function linkCode(pid, key) {
   const p = product(pid);
   if (!p || !key) return;
   removeCodeElsewhere(key, pid);
   p.codes = [...new Set([...(p.codes || []), key])];
-  db.put('products', p);
+  cloud.patchDoc('products', pid, { codes: p.codes });
   touch();
 }
 export function unlinkCode(pid, key) {
   const p = product(pid);
   if (!p) return;
   p.codes = (p.codes || []).filter((k) => k !== key);
-  db.put('products', p);
+  cloud.patchDoc('products', pid, { codes: p.codes });
   touch();
 }
-
 export function deleteProduct(id) {
   const p = product(id);
   if (!p) return;
   S.products = S.products.filter((x) => x.id !== id);
-  db.del('products', id);
-  if (S.orderList[id]) { delete S.orderList[id]; saveKV('orderList', S.orderList); }
+  cloud.removeDoc('products', id);
+  if (S.orderList[id]) { delete S.orderList[id]; cloud.mergeDoc('meta', 'orderList', { items: { [id]: cloud.del() } }); }
   log({ productId: id, pname: p.name, type: 'elimina' });
   touch();
 }
@@ -291,26 +323,26 @@ export function deleteProduct(id) {
 // ---------- Fornitori ----------
 export function saveSupplier(data) {
   if (!data.id) {
-    const s = { name: '', web: '', email: '', phone: '', whatsapp: '', agent: '', leadDays: 3, freeShip: null, note: '', ...data, id: uid(), createdAt: Date.now() };
+    const s = { name: '', web: '', email: '', phone: '', whatsapp: '', agent: '', leadDays: 3, freeShip: null, note: '', searchUrl: '', ...data, id: uid(), createdAt: Date.now() };
     S.suppliers.push(s);
-    db.put('suppliers', s);
+    cloud.putDoc('suppliers', s.id, s);
     touch();
     return s;
   }
   const s = supplier(data.id);
   Object.assign(s, data);
-  db.put('suppliers', s);
+  cloud.putDoc('suppliers', s.id, s);
   touch();
   return s;
 }
 export function deleteSupplier(id) {
   S.suppliers = S.suppliers.filter((s) => s.id !== id);
-  db.del('suppliers', id);
+  cloud.removeDoc('suppliers', id);
   for (const p of S.products) {
-    let changed = false;
-    if (p.supplierId === id) { p.supplierId = null; changed = true; }
-    if (p.alts?.some((a) => a.supplierId === id)) { p.alts = p.alts.filter((a) => a.supplierId !== id); changed = true; }
-    if (changed) db.put('products', p);
+    const fields = {};
+    if (p.supplierId === id) { p.supplierId = null; fields.supplierId = null; }
+    if (p.alts?.some((a) => a.supplierId === id)) { p.alts = p.alts.filter((a) => a.supplierId !== id); fields.alts = p.alts; }
+    if (Object.keys(fields).length) cloud.patchDoc('products', p.id, fields);
   }
   touch();
 }
@@ -318,73 +350,45 @@ export function deleteSupplier(id) {
 // ---------- Categorie ----------
 export function saveCategory(data) {
   if (!data.id) {
-    const c = { name: '', emoji: '📦', color: 'sky', respId: null, order: S.categories.length, ...data, id: uid() };
+    const c = { name: '', emoji: '📦', color: 'sky', order: S.categories.length, ...data, id: uid() };
     S.categories.push(c);
-    db.put('categories', c);
+    cloud.putDoc('categories', c.id, c);
     touch();
     return c;
   }
   const c = category(data.id);
   Object.assign(c, data);
-  db.put('categories', c);
+  cloud.putDoc('categories', c.id, c);
   touch();
   return c;
 }
 export function deleteCategory(id) {
   if (S.products.some((p) => p.catId === id)) return false;
   S.categories = S.categories.filter((c) => c.id !== id);
-  db.del('categories', id);
+  cloud.removeDoc('categories', id);
   touch();
   return true;
 }
 
-// ---------- Persone ----------
-export function saveUser(data) {
-  if (!data.id) {
-    const u = { name: '', fullName: '', role: 'assistente', color: 'petrol', pin: null, ...data, id: uid() };
-    S.users.push(u);
-    db.put('users', u);
-    touch();
-    return u;
-  }
-  const u = user(data.id);
-  Object.assign(u, data);
-  db.put('users', u);
-  touch();
-  return u;
-}
-export function deleteUser(id) {
-  S.users = S.users.filter((u) => u.id !== id);
-  db.del('users', id);
-  for (const c of S.categories) if (c.respId === id) { c.respId = null; db.put('categories', c); }
-  for (const p of S.products) if (p.respId === id) { p.respId = null; db.put('products', p); }
-  touch();
-}
-
 // ---------- Lista da ordinare ----------
-function saveList() { saveKV('orderList', S.orderList); touch(); }
-export function listSet(pid, patch) {
-  S.orderList[pid] = { ...(S.orderList[pid] || {}), ...patch };
-  saveList();
+function setListItem(pid, value) {
+  if (value == null) delete S.orderList[pid]; else S.orderList[pid] = value;
+  cloud.mergeDoc('meta', 'orderList', { items: { [pid]: value == null ? cloud.del() : value } });
+  touch();
 }
+export function listSet(pid, patch) { setListItem(pid, { ...(S.orderList[pid] || {}), ...patch }); }
 export function listAdd(pid, packs) {
-  S.orderList[pid] = { ...(S.orderList[pid] || {}), manual: true, packs: packs ?? S.orderList[pid]?.packs ?? null, skip: null };
-  saveList();
+  setListItem(pid, { ...(S.orderList[pid] || {}), manual: true, packs: packs ?? S.orderList[pid]?.packs ?? null, skip: null });
 }
 export function listRemove(pid) {
   const p = product(pid);
   const e = S.orderList[pid] || {};
   const d = dp(pid);
   const auto = d && (d.status === 'esaurito' || d.status === 'ordinare');
-  if (auto) S.orderList[pid] = { ...e, manual: false, skip: { at: Date.now(), qty: p?.qty } };
-  else delete S.orderList[pid];
-  saveList();
+  if (auto) setListItem(pid, { ...e, manual: false, skip: { at: Date.now(), qty: p?.qty } });
+  else setListItem(pid, null);
 }
-export function listRestore(pid) {
-  const e = S.orderList[pid] || {};
-  S.orderList[pid] = { ...e, skip: null };
-  saveList();
-}
+export function listRestore(pid) { setListItem(pid, { ...(S.orderList[pid] || {}), skip: null }); }
 
 // ---------- Ordini ----------
 export function createOrder({ supplierId, items, expectedAt, note, text }) {
@@ -395,13 +399,14 @@ export function createOrder({ supplierId, items, expectedAt, note, text }) {
       productId: it.p.id, name: it.p.name, unit: it.p.unit, packSize: it.p.packSize || 1, packLabel: it.p.packLabel || 'confezione',
       packs: it.packs, price: it.price ?? null, receivedUnits: 0,
     })),
-    createdAt: Date.now(), orderedBy: S.session.userId, expectedAt: expectedAt || null, note: note || '', text: text || '',
+    createdAt: Date.now(), expectedAt: expectedAt || null, note: note || '', text: text || '',
   };
   o.total = o.items.reduce((sum, it) => sum + (it.price || 0) * it.packs, 0);
   S.orders.push(o);
-  db.put('orders', o);
-  for (const it of items) delete S.orderList[it.p.id];
-  saveKV('orderList', S.orderList);
+  cloud.putDoc('orders', o.id, o);
+  const patch = {};
+  for (const it of items) { delete S.orderList[it.p.id]; patch[it.p.id] = cloud.del(); }
+  cloud.mergeDoc('meta', 'orderList', { items: patch });
   log({ type: 'ordine', orderId: o.id, text: `${o.items.length} ${o.items.length === 1 ? 'articolo' : 'articoli'} da ${o.supplierName}` });
   touch();
   return o;
@@ -410,52 +415,50 @@ export function createOrder({ supplierId, items, expectedAt, note, text }) {
 export function receiveOrder(orderId, rows) {
   const o = order(orderId);
   if (!o) return;
-  let units = 0;
   for (const r of rows) {
     if (!(r.units > 0)) continue;
     const it = o.items.find((x) => x.productId === r.productId);
     stockMove(r.productId, 'carico', r.units, { lot: r.lot, exp: r.exp, orderId, note: `Arrivo ordine ${o.supplierName}` });
     if (it) {
       it.receivedUnits = (it.receivedUnits || 0) + r.units;
-      if (r.price != null && r.price !== '' && !Number.isNaN(+r.price)) {
+      if (r.price != null && r.price !== '' && !Number.isNaN(+r.price) && +r.price !== it.price) {
         it.price = +r.price;
         const p = product(r.productId);
         if (p) {
-          if (!o.supplierId || o.supplierId === p.supplierId) p.price = +r.price;
-          else { const a = (p.alts || []).find((x) => x.supplierId === o.supplierId); if (a) a.price = +r.price; }
-          db.put('products', p);
+          if (!o.supplierId || o.supplierId === p.supplierId) { p.price = +r.price; cloud.patchDoc('products', p.id, { price: p.price }); }
+          else {
+            const a = (p.alts || []).find((x) => x.supplierId === o.supplierId);
+            if (a) { a.price = +r.price; cloud.patchDoc('products', p.id, { alts: p.alts }); }
+          }
         }
       }
     }
-    units += r.units;
   }
   const done = o.items.every((it) => (it.receivedUnits || 0) >= it.packs * it.packSize);
   o.status = done ? 'arrivato' : 'parziale';
   if (done) o.receivedAt = Date.now();
   o.total = o.items.reduce((sum, it) => sum + (it.price || 0) * it.packs, 0);
-  db.put('orders', o);
+  cloud.putDoc('orders', o.id, o);
   log({ type: 'arrivo', orderId, text: `${done ? 'Ordine completo' : 'Arrivo parziale'} da ${o.supplierName}` });
   touch();
 }
 export function closeOrder(orderId) {
   const o = order(orderId);
-  o.status = 'arrivato';
-  o.receivedAt = Date.now();
-  o.closedPartial = true;
-  db.put('orders', o);
+  Object.assign(o, { status: 'arrivato', receivedAt: Date.now(), closedPartial: true });
+  cloud.putDoc('orders', o.id, o);
   touch();
 }
 export function cancelOrder(orderId) {
   const o = order(orderId);
   o.status = 'annullato';
-  db.put('orders', o);
+  cloud.putDoc('orders', o.id, o);
   log({ type: 'annullato', orderId, text: `Ordine annullato (${o.supplierName})` });
   touch();
 }
 export function updateOrder(orderId, patch) {
   const o = order(orderId);
   Object.assign(o, patch);
-  db.put('orders', o);
+  cloud.putDoc('orders', o.id, o);
   touch();
 }
 
@@ -474,84 +477,163 @@ export const DEFAULT_SUPPLIERS = [
   { name: 'Eli-Dent', web: 'https://www.elidentgroup.it', leadDays: 3 },
 ];
 
-export function setupStudio({ users, studioName }) {
-  S.users = []; S.categories = []; S.suppliers = [];
-  for (const u of users) saveUser(u);
-  DEFAULT_CATEGORIES.forEach(([name, emoji, color], i) => saveCategory({ name, emoji, color, order: i }));
-  for (const s of DEFAULT_SUPPLIERS) saveSupplier(s);
-  setSettings({ studioName: studioName || DEFAULT_SETTINGS.studioName, setupDone: true });
+export async function setupStudio({ studioName, signature, suppliers, demo }) {
+  const ops = [];
+  const cats = DEFAULT_CATEGORIES.map(([name, emoji, color], i) => ({ id: uid() + i, name, emoji, color, order: i }));
+  const sups = suppliers.filter((s) => s.name.trim()).map((s, i) => ({
+    email: '', phone: '', whatsapp: '', agent: '', freeShip: null, note: '', searchUrl: '', leadDays: 3, ...s, name: s.name.trim(), id: uid() + 's' + i, createdAt: Date.now(),
+  }));
+  for (const c of cats) ops.push({ type: 'set', name: 'categories', id: c.id, data: c });
+  for (const s of sups) ops.push({ type: 'set', name: 'suppliers', id: s.id, data: s });
+  const settings = { ...DEFAULT_SETTINGS, studioName: studioName || DEFAULT_SETTINGS.studioName, signature: signature || '', setupDone: true };
+  ops.push({ type: 'set', name: 'meta', id: 'settings', data: settings });
+  S.categories = cats; S.suppliers = sups; S.settings = settings; S.settingsExists = true;
+  await cloud.batchWrite(ops);
+  touch();
+  if (demo) await loadDemo();
 }
 
 // ---------- Dati di esempio ----------
+function groupByDay(movs) {
+  const by = new Map();
+  for (const m of movs) {
+    const day = m.day || cloud.dayKey(m.ts);
+    if (!by.has(day)) by.set(day, []);
+    by.get(day).push(cloud.clean({ ...m, day }));
+  }
+  return by;
+}
 export async function loadDemo() {
   const { buildDemo } = await import('./demo.js');
-  const data = buildDemo({ now: Date.now(), users: S.users, categories: S.categories, suppliers: S.suppliers, uid });
-  for (const s of S.suppliers) db.put('suppliers', s); // soglie di spedizione gratuita d'esempio
-  for (const s of data.suppliers) { S.suppliers.push(s); db.put('suppliers', s); }
-  for (const c of data.categoryResp) { const cat = category(c.id); if (cat) { cat.respId = c.respId; db.put('categories', cat); } }
-  for (const p of data.products) { S.products.push(p); db.put('products', p); }
-  for (const m of data.movements) { S.movements.push(m); db.put('movements', m); }
+  const data = buildDemo({ now: Date.now(), categories: S.categories, suppliers: S.suppliers, uid });
+  const ops = [];
+  for (const s of S.suppliers) if (s.freeShip != null) ops.push({ type: 'merge', name: 'suppliers', id: s.id, data: { freeShip: s.freeShip } });
+  for (const s of data.suppliers) { S.suppliers.push(s); ops.push({ type: 'set', name: 'suppliers', id: s.id, data: s }); }
+  for (const p of data.products) { S.products.push(p); ops.push({ type: 'set', name: 'products', id: p.id, data: p }); }
+  for (const o of data.orders) { S.orders.push(o); ops.push({ type: 'set', name: 'orders', id: o.id, data: o }); }
+  for (const [day, items] of groupByDay(data.movements)) {
+    ops.push({ type: 'logAdd', name: 'log', id: day, items });
+    S.movements.push(...items);
+  }
   S.movements.sort((a, b) => a.ts - b.ts);
-  for (const o of data.orders) { S.orders.push(o); db.put('orders', o); }
-  setSettings({ demo: true });
+  ops.push({ type: 'merge', name: 'meta', id: 'settings', data: { demo: true } });
+  S.settings = { ...S.settings, demo: true };
+  await cloud.batchWrite(ops);
   touch();
 }
-export function removeDemo() {
-  const ids = new Set(S.products.filter((p) => p.demo).map((p) => p.id));
-  for (const id of ids) db.del('products', id);
+export async function removeDemo() {
+  const ops = [];
+  for (const p of S.products) if (p.demo) ops.push({ type: 'delete', name: 'products', id: p.id });
+  for (const o of S.orders) if (o.demo) ops.push({ type: 'delete', name: 'orders', id: o.id });
+  for (const s of S.suppliers) if (s.demo) ops.push({ type: 'delete', name: 'suppliers', id: s.id });
+  const demoIds = new Set(S.products.filter((p) => p.demo).map((p) => p.id));
+  const items = {};
+  for (const id of demoIds) if (S.orderList[id]) { items[id] = cloud.del(); delete S.orderList[id]; }
+  if (Object.keys(items).length) ops.push({ type: 'merge', name: 'meta', id: 'orderList', data: { items } });
+  // i movimenti di esempio sono mescolati per giorno: li rimuovo da tutti i giorni, anche quelli più vecchi
+  let logs = [];
+  try { logs = await cloud.getAll('log'); } catch { logs = []; }
+  for (const d of logs) {
+    const demoItems = (d.data.m || []).filter((m) => m.demo);
+    if (demoItems.length) ops.push({ type: 'logRemove', name: 'log', id: d.id, items: demoItems });
+  }
+  ops.push({ type: 'merge', name: 'meta', id: 'settings', data: { demo: false } });
   S.products = S.products.filter((p) => !p.demo);
-  for (const m of S.movements) if (m.demo) db.del('movements', m.id);
-  S.movements = S.movements.filter((m) => !m.demo);
-  for (const o of S.orders) if (o.demo) db.del('orders', o.id);
   S.orders = S.orders.filter((o) => !o.demo);
-  for (const s of S.suppliers) if (s.demo) db.del('suppliers', s.id);
   S.suppliers = S.suppliers.filter((s) => !s.demo);
-  for (const id of ids) delete S.orderList[id];
-  saveKV('orderList', S.orderList);
-  setSettings({ demo: false });
+  S.movements = S.movements.filter((m) => !m.demo);
+  S.settings = { ...S.settings, demo: false };
+  await cloud.batchWrite(ops);
   touch();
 }
 
+// ---------- Attività più vecchie (lette solo quando servono) ----------
+export async function loadOlderMovements() {
+  const oldest = [...S.olderMovements, ...S.movements].reduce((m, x) => Math.min(m, x.ts), Date.now());
+  const before = cloud.dayKey(Math.min(oldest, Date.now() - cloud.LOG_DAYS * DAY));
+  const docs = await cloud.getAll('log', before);
+  const all = docs.flatMap((d) => (d.data.m || []).map((m) => ({ ...m, day: m.day || d.id })));
+  const seen = new Set(S.movements.map((m) => m.id));
+  S.olderMovements = all.filter((m) => !seen.has(m.id)).sort((a, b) => a.ts - b.ts);
+  touch();
+  return S.olderMovements.length;
+}
+
 // ---------- Backup ----------
-export function exportBackup() {
+export async function exportBackup() {
+  let movements = S.movements;
+  try {
+    const docs = await cloud.getAll('log');
+    movements = docs.flatMap((d) => (d.data.m || []).map((m) => ({ ...m, day: m.day || d.id }))).sort((a, b) => a.ts - b.ts);
+  } catch { /* offline: esporto quelli in memoria */ }
+  const strip = (p) => { const { _zeroLots, rawQty, ...rest } = p; return rest; };
   return {
-    app: 'magazzino-studio', version: 1, appVersion: APP_VERSION, exportedAt: new Date().toISOString(),
+    app: 'magazzino-studio', version: 2, appVersion: APP_VERSION, exportedAt: new Date().toISOString(),
     data: {
-      users: S.users, products: S.products, suppliers: S.suppliers, categories: S.categories,
-      movements: S.movements, orders: S.orders, settings: S.settings, orderList: S.orderList,
+      products: S.products.map(strip), suppliers: S.suppliers, categories: S.categories,
+      movements, orders: S.orders, settings: S.settings, orderList: S.orderList,
     },
   };
 }
 export function markBackup() { setSettings({ lastBackup: Date.now() }); }
 
-export async function importBackup(obj) {
+export async function importBackup(obj, { wipe = true } = {}) {
   if (!obj || obj.app !== 'magazzino-studio' || !obj.data) throw new Error('Il file non è un backup di questa app.');
   const d = obj.data;
-  for (const s of db.STORES) db.clear(s);
-  for (const k of ['users', 'products', 'suppliers', 'categories', 'movements', 'orders']) {
-    S[k] = Array.isArray(d[k]) ? d[k] : [];
-    for (const r of S[k]) db.put(k, r);
-  }
-  S.movements.sort((a, b) => a.ts - b.ts);
-  S.settings = { ...DEFAULT_SETTINGS, ...(d.settings || {}), setupDone: true };
-  S.orderList = d.orderList || {};
-  saveKV('settings', S.settings);
-  saveKV('orderList', S.orderList);
-  S.session = { userId: null, lastActive: 0 };
-  saveKV('session', S.session);
-  await db.flush();
+  if (wipe) await cloud.wipeAll();
+  const ops = [];
+  const products = (d.products || []).map((p) => ({ ...p, lots: (p.lots || []).filter((l) => l.qty > 0) }));
+  for (const p of products) ops.push({ type: 'set', name: 'products', id: p.id, data: p });
+  for (const s of d.suppliers || []) ops.push({ type: 'set', name: 'suppliers', id: s.id, data: s });
+  for (const c of d.categories || []) { const { respId, ...rest } = c; ops.push({ type: 'set', name: 'categories', id: c.id, data: rest }); }
+  for (const o of d.orders || []) { const { orderedBy, ...rest } = o; ops.push({ type: 'set', name: 'orders', id: o.id, data: rest }); }
+  const movs = (d.movements || []).map(({ userId, ...m }) => m);
+  for (const [day, items] of groupByDay(movs)) ops.push({ type: 'logAdd', name: 'log', id: day, items });
+  const { lockMinutes, ...settings } = d.settings || {};
+  ops.push({ type: 'set', name: 'meta', id: 'settings', data: { ...DEFAULT_SETTINGS, ...settings, setupDone: true } });
+  ops.push({ type: 'set', name: 'meta', id: 'orderList', data: { items: d.orderList || {} } });
+  // aggiorno subito lo stato locale; gli ascolti di Firestore confermeranno
+  S.products = products; S.suppliers = d.suppliers || []; S.categories = (d.categories || []);
+  S.orders = d.orders || []; S.movements = [...groupByDay(movs).values()].flat().sort((a, b) => a.ts - b.ts);
+  S.settings = { ...DEFAULT_SETTINGS, ...settings, setupDone: true }; S.settingsExists = true; S.orderList = d.orderList || {};
+  await cloud.batchWrite(ops);
   touch();
 }
 
+/** Dati della versione precedente (solo su questo dispositivo), se presenti */
+export async function readLegacyLocalData() {
+  try {
+    if (indexedDB.databases) {
+      const list = await indexedDB.databases();
+      if (!list.some((x) => x.name === 'magazzino-studio')) return null;
+    }
+    const db = await new Promise((res) => {
+      const r = indexedDB.open('magazzino-studio');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => res(null);
+      r.onupgradeneeded = () => { r.transaction.abort(); res(null); };
+    });
+    if (!db) return null;
+    const get = (s) => new Promise((res) => {
+      try { const q = db.transaction(s, 'readonly').objectStore(s).getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); } catch { res([]); }
+    });
+    const [products, suppliers, categories, movements, orders, kv] = await Promise.all(['products', 'suppliers', 'categories', 'movements', 'orders', 'kv'].map(get));
+    db.close();
+    if (!products.length) return null;
+    const kvm = Object.fromEntries(kv.map((k) => [k.id, k.data]));
+    return { app: 'magazzino-studio', version: 1, data: { products, suppliers, categories, movements, orders, settings: kvm.settings || {}, orderList: kvm.orderList || {} } };
+  } catch { return null; }
+}
+
 export async function resetAll() {
-  for (const s of db.STORES) db.clear(s);
-  await db.flush();
-  Object.assign(S, { users: [], products: [], suppliers: [], categories: [], movements: [], orders: [], orderList: {}, settings: { ...DEFAULT_SETTINGS }, session: { userId: null, lastActive: 0 } });
+  await cloud.wipeAll();
+  resetData();
+  S.settingsExists = false;
   touch();
 }
 
 // ---------- CSV ----------
-export const CSV_COLUMNS = ['nome', 'marca', 'categoria', 'quantita', 'unita', 'pezzi_per_confezione', 'nome_confezione', 'soglia_minima', 'scorta_ideale', 'fornitore', 'codice_fornitore', 'prezzo_confezione', 'ubicazione', 'responsabile', 'codice_barre', 'controlla_scadenze', 'note'];
+export const CSV_COLUMNS = ['nome', 'marca', 'categoria', 'quantita', 'unita', 'pezzi_per_confezione', 'nome_confezione', 'soglia_minima', 'scorta_ideale', 'fornitore', 'codice_fornitore', 'prezzo_confezione', 'ubicazione', 'codice_barre', 'controlla_scadenze', 'note'];
 
 const csvCell = (v) => {
   const s = v == null ? '' : String(v);
@@ -563,7 +645,7 @@ export function exportCSV() {
     rows.push([
       p.name, p.brand, category(p.catId)?.name || '', p.qty, p.unit, p.packSize, p.packLabel, p.min, p.max ?? '',
       supplier(p.supplierId)?.name || '', p.supplierCode, p.price != null ? String(p.price).replace('.', ',') : '',
-      p.location, user(p.respId)?.name || '', (p.codes || []).filter((k) => k.startsWith('gtin:')).map((k) => k.slice(5)).join(' '),
+      p.location, (p.codes || []).filter((k) => k.startsWith('gtin:')).map((k) => k.slice(5)).join(' '),
       p.trackExpiry ? 'si' : 'no', p.note,
     ]);
   }
@@ -590,14 +672,20 @@ export function parseCSV(text) {
     } else cell += ch;
   }
   if (cell || row.length) { row.push(cell); rows.push(row); }
-  const clean = rows.filter((r) => r.some((c) => c.trim()));
-  if (!clean.length) return { headers: [], records: [] };
-  const headers = clean[0].map((h) => norm(h).trim().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''));
-  const records = clean.slice(1).map((r) => Object.fromEntries(headers.map((h, i) => [h, (r[i] || '').trim()])));
+  const cleanRows = rows.filter((r) => r.some((c) => c.trim()));
+  if (!cleanRows.length) return { headers: [], records: [] };
+  const headers = cleanRows[0].map((h) => norm(h).trim().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''));
+  const records = cleanRows.slice(1).map((r) => Object.fromEntries(headers.map((h, i) => [h, (r[i] || '').trim()])));
   return { headers, records };
 }
 
-const num = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/\./g, (m, i, s) => (s.includes(',') ? '' : '.')).replace(',', '.')); return Number.isFinite(n) ? n : null; };
+const num = (v) => {
+  if (v == null || v === '') return null;
+  let s = String(v).trim();
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+};
 const pick = (r, ...keys) => { for (const k of keys) if (r[k] != null && r[k] !== '') return r[k]; return ''; };
 
 export function planCSV(records) {
@@ -625,7 +713,6 @@ export function applyCSV(plan) {
     if (!s) s = saveSupplier({ name });
     return s.id;
   };
-  const findUser = (name) => (name ? S.users.find((u) => norm(u.name) === norm(name))?.id || null : null);
   const fields = (r) => {
     const f = {};
     const set = (k, v) => { if (v !== '' && v != null) f[k] = v; };
@@ -639,7 +726,6 @@ export function applyCSV(plan) {
     set('supplierCode', pick(r, 'codice_fornitore', 'codice_articolo', 'ref'));
     set('price', num(pick(r, 'prezzo_confezione', 'prezzo')));
     set('location', pick(r, 'ubicazione', 'posizione'));
-    set('respId', findUser(pick(r, 'responsabile')));
     set('note', pick(r, 'note'));
     const te = norm(pick(r, 'controlla_scadenze', 'scadenze'));
     if (te) f.trackExpiry = ['si', 'sì', 'yes', 'x', '1', 'true'].includes(te);
@@ -649,8 +735,7 @@ export function applyCSV(plan) {
   };
   let created = 0, updated = 0;
   for (const it of plan.create) {
-    const f = fields(it.r);
-    saveProduct({ name: it.name, brand: it.brand, ...f, qty: num(pick(it.r, 'quantita', 'qta', 'giacenza')) || 0, demo: false });
+    saveProduct({ name: it.name, brand: it.brand, ...fields(it.r), qty: num(pick(it.r, 'quantita', 'qta', 'giacenza')) || 0 });
     created++;
   }
   for (const it of plan.update) {
@@ -668,10 +753,10 @@ export function applyCSV(plan) {
 export function updateBadge() {
   try {
     if (!('setAppBadge' in navigator)) return;
-    if (!S.settings.badge || !S.ready) { navigator.clearAppBadge?.(); return; }
+    if (!S.settings.badge || S.phase !== 'ready') { navigator.clearAppBadge?.(); return; }
     const n = derived().toOrder;
     if (n > 0) navigator.setAppBadge(n); else navigator.clearAppBadge();
   } catch { /* non supportato */ }
 }
 
-export { db, priceFor };
+export { priceFor };

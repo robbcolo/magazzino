@@ -1,10 +1,10 @@
 import { html, useState } from '../../vendor/preact-htm.js';
 import {
-  S, product, dp, category, supplier, user, respFor, me, isAdmin, stockMove, undoMove, saveProduct, deleteProduct,
+  S, product, dp, category, supplier, stockMove, undoMove, saveProduct, deleteProduct,
   listAdd, listRemove, unlinkCode, linkCode, derived,
 } from '../store.js';
 import {
-  SHEETS, Sheet, Icon, Avatar, Thumb, CatBadge, Carpule, StatusChip, ExpChip, Segmented, Stepper, Field, Toggle, Bars, Empty,
+  SHEETS, Sheet, Icon, Thumb, CatBadge, Carpule, StatusChip, ExpChip, Segmented, Stepper, Field, Toggle, Bars, Empty,
   openSheet, closeSheet, toast, confirmDialog, haptic, fmtQty, fmtN, fmtEuro, fmtDate, fmtExp, relDay, unitFor, daysLabel,
   plural, readFile, photoToDataURL, navigate, NumberInput,
 } from '../ui.js';
@@ -19,8 +19,6 @@ function ProductSheet({ id, close }) {
   const d = dp(id);
   const cat = category(p.catId);
   const sup = supplier(p.supplierId);
-  const respId = respFor(p);
-  const resp = user(respId);
   const inList = S.orderList[p.id]?.manual || derived().groups.some((g) => g.items.some((it) => it.p.id === p.id));
   const moves = S.movements.filter((m) => m.productId === p.id).slice(-15).reverse();
   const weekStart = startOfDay(Date.now()) - ((new Date().getDay() + 6) % 7) * DAY;
@@ -53,7 +51,7 @@ function ProductSheet({ id, close }) {
 
   return html`<${Sheet} title=${p.name} sub=${p.brand} close=${close} wide cls="tall"
     footer=${html`
-      ${isAdmin() && html`<button class="btn soft-danger" onClick=${del}><${Icon} n="trash" s="20" />Elimina</button>`}
+      <button class="btn soft-danger" onClick=${del}><${Icon} n="trash" s="20" />Elimina</button>
       <span class="grow"></span>
       <button class="btn" onClick=${() => openSheet('productEdit', { id: p.id })}><${Icon} n="pencil" s="20" />Modifica scheda</button>`}>
     <div class="pd-head">
@@ -104,10 +102,6 @@ function ProductSheet({ id, close }) {
         ${d.rate ? html`<b>${fmtN(d.rate < 1 ? Math.round(d.rate * 5 * 10) / 10 : Math.round(d.rate * 10) / 10)} ${unitFor(p.unit, 2)} ${d.rate < 1 ? 'a settimana' : 'al giorno'}</b><small>${fmtQty(d.used90, p.unit)} negli ultimi 90 giorni</small>` : html`<b>–</b><small>${fmtQty(d.used90, p.unit)} presi finora</small>`}
       </div>
       <div class="fact">
-        <span>Chi lo ordina</span>
-        ${resp ? html`<b style="display:flex;gap:8px;align-items:center"><${Avatar} u=${resp} size=${24} />${resp.name}</b><small>${p.respId ? 'Scelto per questo materiale' : `Responsabile di ${cat?.name || 'categoria'}`}</small>` : html`<b>Nessuno</b><small>Sceglilo nella scheda o nella categoria</small>`}
-      </div>
-      <div class="fact">
         <span>Da chi si ordina</span>
         ${sup ? html`<b>${sup.name}</b><small>${pack}${p.price != null ? `, ${fmtEuro(p.price)}` : ''}</small>` : html`<b>Nessun fornitore</b><small>Aggiungilo modificando la scheda</small>`}
       </div>
@@ -117,7 +111,7 @@ function ProductSheet({ id, close }) {
       </div>
     </div>
 
-    ${d.suggestedMin && isAdmin() && html`<div class="suggest">
+    ${d.suggestedMin && html`<div class="suggest">
       <${Icon} n="sparkles" s="22" />
       <p>Dai prelievi degli ultimi mesi, una soglia di <b>${fmtN(d.suggestedMin)}</b> basterebbe a coprire la consegna con margine (ora è ${fmtN(p.min)}).</p>
       <button class="btn small" onClick=${() => { saveProduct({ id: p.id, min: d.suggestedMin, max: p.max && p.max <= d.suggestedMin ? null : p.max }); toast('Soglia aggiornata'); }}>Usa ${fmtN(d.suggestedMin)}</button>
@@ -191,7 +185,6 @@ function MoveSheet({ id, mode: initial = 'prendo', lot = '', exp = '', close }) 
   const [note, setNote] = useState('');
   const [showLot, setShowLot] = useState(!!(lot || exp || p?.trackExpiry));
   if (!p) return null;
-  const u = me();
   const d = dp(id);
   const change = (m) => { setMode(m); setN(m === 'correggo' ? p.qty : m === 'carico' ? p.packSize || 1 : 1); };
   const firstLot = fefo(p.lots || [])[0];
@@ -219,8 +212,7 @@ function MoveSheet({ id, mode: initial = 'prendo', lot = '', exp = '', close }) 
   const label = mode === 'prendo' ? `Prendi ${fmtQty(Math.min(n, p.qty) || n, p.unit)}` : mode === 'carico' ? `Carica ${fmtQty(n, p.unit)}` : `Imposta a ${fmtQty(n, p.unit)}`;
 
   return html`<${Sheet} title=${p.name} sub=${`Adesso: ${fmtQty(p.qty, p.unit)}`} close=${close}
-    footer=${html`<span style="display:flex;gap:8px;align-items:center;color:var(--ink-3);font-size:14px"><${Avatar} u=${u} size=${28} />Registri come ${u?.name}</span>
-      <span class="grow"></span>
+    footer=${html`<span class="grow"></span>
       <button class="btn primary big" onClick=${confirm} disabled=${mode !== 'correggo' && !(n > 0)}>${label}</button>`}>
     <${Segmented} cls="full" value=${mode} onChange=${change} options=${[
       { v: 'prendo', l: 'Prendo', icon: 'minus' },
@@ -263,12 +255,11 @@ function ProductEditSheet({ id, code, name: preName, close }) {
     ? { ...existing, alts: (existing.alts || []).map((a) => ({ ...a })), codes: [...(existing.codes || [])] }
     : {
       name: preName || '', brand: '', catId: S.categories[0]?.id || null, unit: 'pz', packSize: 1, packLabel: 'confezione', qty: 0, min: null, max: null,
-      location: '', respId: null, supplierId: null, supplierCode: '', price: null, alts: [], codes: code?.key ? [code.key] : [],
+      location: '', supplierId: null, supplierCode: '', price: null, alts: [], codes: code?.key ? [code.key] : [],
       trackExpiry: !!(code?.exp || code?.lot), leadDays: null, note: '', photo: null, firstLot: code?.lot || '', firstExp: code?.exp || '',
     });
   const set = (patch) => setF((x) => ({ ...x, ...patch }));
   const cat = category(f.catId);
-  const catResp = user(cat?.respId);
   const locations = [...new Set(S.products.map((p) => p.location).filter(Boolean))].sort();
   const sup = supplier(f.supplierId);
   const valid = f.name.trim().length > 0;
@@ -336,9 +327,13 @@ function ProductEditSheet({ id, code, name: preName, close }) {
       <div class="hr"></div>
       <div class="form-grid three">
         <${Field} label="Fornitore principale">
-          <select class="input" value=${f.supplierId || ''} onChange=${(e) => set({ supplierId: e.target.value || null })}>
+          <select class="input" value=${f.supplierId || ''} onChange=${(e) => {
+            if (e.target.value === '__new') { e.target.value = f.supplierId || ''; openSheet('supplierEdit', { onSaved: (s) => set({ supplierId: s.id }) }); return; }
+            set({ supplierId: e.target.value || null });
+          }}>
             <option value="">Nessuno</option>
-            ${[...S.suppliers].sort((a, b) => a.name.localeCompare(b.name)).map((s) => html`<option value=${s.id}>${s.name}</option>`)}
+            ${[...S.suppliers].sort((a, b) => a.name.localeCompare(b.name, 'it')).map((s) => html`<option value=${s.id}>${s.name}</option>`)}
+            <option value="__new">+ Nuovo fornitore…</option>
           </select>
         </${Field}>
         <${Field} label="Codice articolo"><input class="input" value=${f.supplierCode} onInput=${(e) => set({ supplierCode: e.target.value })} placeholder="Facoltativo" /></${Field}>
@@ -346,9 +341,14 @@ function ProductEditSheet({ id, code, name: preName, close }) {
       </div>
       ${f.alts.map((a, i) => html`<div class="form-grid three" key=${i} style="align-items:end">
         <${Field} label=${`Alternativa ${i + 1}`}>
-          <select class="input" value=${a.supplierId || ''} onChange=${(e) => set({ alts: f.alts.map((x, j) => (j === i ? { ...x, supplierId: e.target.value } : x)) })}>
+          <select class="input" value=${a.supplierId || ''} onChange=${(e) => {
+            const setAlt = (sid) => setF((x) => ({ ...x, alts: x.alts.map((y, j) => (j === i ? { ...y, supplierId: sid } : y)) }));
+            if (e.target.value === '__new') { e.target.value = a.supplierId || ''; openSheet('supplierEdit', { onSaved: (s) => setAlt(s.id) }); return; }
+            setAlt(e.target.value);
+          }}>
             <option value="">Scegli…</option>
-            ${S.suppliers.filter((s) => s.id !== f.supplierId).map((s) => html`<option value=${s.id}>${s.name}</option>`)}
+            ${S.suppliers.filter((s) => s.id !== f.supplierId).sort((x, y) => x.name.localeCompare(y.name, 'it')).map((s) => html`<option value=${s.id}>${s.name}</option>`)}
+            <option value="__new">+ Nuovo fornitore…</option>
           </select>
         </${Field}>
         <${Field} label="Codice"><input class="input" value=${a.code || ''} onInput=${(e) => set({ alts: f.alts.map((x, j) => (j === i ? { ...x, code: e.target.value } : x)) })} /></${Field}>
@@ -360,12 +360,6 @@ function ProductEditSheet({ id, code, name: preName, close }) {
       <button type="button" class="link-btn" onClick=${() => set({ alts: [...f.alts, { supplierId: '', code: '', price: null }] })}><${Icon} n="plus" s="18" />Aggiungi un fornitore alternativo, per confrontare i prezzi</button>
 
       <div class="form-grid">
-        <${Field} label="Chi lo ordina">
-          <select class="input" value=${f.respId || ''} onChange=${(e) => set({ respId: e.target.value || null })}>
-            <option value="">${catResp ? `Come la categoria (${catResp.name})` : 'Come la categoria (nessuno)'}</option>
-            ${S.users.map((u) => html`<option value=${u.id}>${u.name}</option>`)}
-          </select>
-        </${Field}>
         <${Field} label="Tempo di consegna" hint=${sup ? `Se vuoto: ${plural(sup.leadDays ?? S.settings.defaultLeadDays, 'giorno', 'giorni')}, come ${sup.name}.` : 'Se vuoto, usa il valore del fornitore.'}>
           <div class="input-group"><${NumberInput} value=${f.leadDays} onInput=${(v) => set({ leadDays: v })} inputmode="numeric" /><span class="input-suffix">giorni</span></div>
         </${Field}>

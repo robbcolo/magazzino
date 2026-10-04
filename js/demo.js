@@ -57,7 +57,7 @@ function rng(seed) {
   return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
 
-export function buildDemo({ now, users, categories, suppliers, uid }) {
+export function buildDemo({ now, categories, suppliers, uid }) {
   const R = rng(20261004);
   const poisson = (l) => { if (l <= 0) return 0; const L = Math.exp(-l); let k = 0, p = 1; do { k++; p *= R(); } while (p > L); return k - 1; };
   const pick = (arr) => arr[Math.floor(R() * arr.length)];
@@ -73,32 +73,24 @@ export function buildDemo({ now, users, categories, suppliers, uid }) {
   supBy['agente implantologia'] = agent.id;
   const freeShip = { dontalia: 150, 'dental leader': 120, umbra: 100, 'dental today': 99, 'eli-dent': 150 };
 
-  const admins = users.filter((u) => u.role === 'admin');
-  const assistants = users.filter((u) => u.role !== 'admin');
-  const anyUser = () => (assistants.length && R() < 0.72 ? pick(assistants) : pick(users));
-  const byName = (i, role) => (role === 'admin' ? admins[i % Math.max(1, admins.length)] : assistants[i % Math.max(1, assistants.length)]) || users[0];
-
-  // responsabili degli ordini per categoria
-  const respMap = {
-    'monouso e dpi': byName(0, 'a'), 'sterilizzazione': byName(0, 'a'),
-    'parodontologia e igiene': byName(1, 'a'), 'impronte': byName(1, 'a'), 'studio e cancelleria': byName(1, 'a'),
-    'conservativa': byName(1, 'admin'), 'endodonzia': byName(1, 'admin'),
-    'implantologia': byName(0, 'admin'), 'chirurgia': byName(0, 'admin'), 'protesi': byName(0, 'admin'),
-    'anestesia e farmaci': byName(2, 'admin'), 'radiologia': byName(2, 'admin'), 'ortodonzia': byName(2, 'admin'),
-  };
-  const categoryResp = categories.filter((c) => !c.respId && respMap[c.name.toLowerCase()]).map((c) => ({ id: c.id, respId: respMap[c.name.toLowerCase()].id }));
-  const respOf = (catName) => respMap[catName.toLowerCase()] || users[0];
+  // utente unico: nessun nome nei movimenti (le chiamate a R() restano per avere sempre gli stessi dati)
+  const anyUser = () => { R(); R(); return { id: undefined }; };
+  const respOf = () => ({ id: undefined });
 
   const products = [], movements = [], rawOrders = [];
   const sup = (name) => [...suppliers, ...extraSuppliers].find((s) => s.id === supBy[name.toLowerCase()]);
 
   P.forEach((row, idx) => {
-    const [name, brand, cat, unit, packSize, packLabel, min, max, rate, price, supName, location, trackExpiry, scenario] = row;
-    const sid = supBy[supName.toLowerCase()] || null;
-    const lead = sup(supName)?.leadDays ?? 3;
+    const [name, brand, cat, unit, packSize, packLabel, min, max, rate, price, supWanted, location, trackExpiry, scenario] = row;
+    // se il fornitore previsto è stato tolto o rinominato all'avvio, uso uno di quelli presenti
+    const fallback = suppliers.length ? suppliers[idx % suppliers.length] : null;
+    const sid = supBy[supWanted.toLowerCase()] || fallback?.id || null;
+    const supObj = [...suppliers, ...extraSuppliers].find((s) => s.id === sid);
+    const supName = supObj?.name || supWanted;
+    const lead = supObj?.leadDays ?? 3;
     const p = {
       id: uid() + idx, name, brand, catId: catBy[cat.toLowerCase()] || categories[0]?.id, unit, packSize, packLabel,
-      qty: 0, min, max, location, respId: null, supplierId: sid, supplierCode: `${(supName.slice(0, 2)).toUpperCase()}-${String(10400 + idx * 37)}`,
+      qty: 0, min, max, location, supplierId: sid, supplierCode: `${(supName.slice(0, 2)).toUpperCase()}-${String(10400 + idx * 37)}`,
       price, alts: [], codes: [], trackExpiry, lots: [], leadDays: null, note: '', photo: null,
       createdAt: today - 125 * DAY, updatedAt: now, demo: true,
     };
@@ -107,14 +99,14 @@ export function buildDemo({ now, users, categories, suppliers, uid }) {
       const altName = ['Dental Today', 'Umbra', 'Eli-Dent', 'Dontalia'][idx % 3];
       if (altName !== supName && supBy[altName.toLowerCase()]) p.alts.push({ supplierId: supBy[altName.toLowerCase()], code: `ALT-${200 + idx}`, price: Math.round(price * (1.04 + R() * 0.12) * 100) / 100 });
     }
-    const mv = (ts, type, qty, before, after, extra = {}) => movements.push({ id: uid() + 'm' + movements.length, ts, userId: extra.userId || anyUser().id, productId: p.id, pname: name, unit, type, qty, before, after, demo: true, ...extra });
+    const mv = (ts, type, qty, before, after, { noRng, ...extra } = {}) => { if (!noRng) anyUser(); movements.push({ id: uid() + 'm' + movements.length, ts, productId: p.id, pname: name, unit, type, qty, before, after, demo: true, ...extra }); };
     const shelf = () => 420 + Math.floor(R() * 420); // giorni di validità
     const newLot = (ts, qty) => ({ id: uid() + 'l' + Math.floor(R() * 1e6), lot: `${String.fromCharCode(65 + Math.floor(R() * 26))}${Math.floor(1000 + R() * 8999)}`, exp: isoDate(ts + shelf() * DAY), qty });
 
     // stato iniziale (125 giorni fa)
     let qty = Math.round(max * (0.55 + R() * 0.4));
     let lots = trackExpiry ? [newLot(today - 125 * DAY, qty)] : [];
-    mv(today - 125 * DAY + 10 * 3600e3, 'nuovo', qty, 0, qty, { userId: (admins[0] || users[0]).id, lot: lots[0]?.lot, exp: lots[0]?.exp });
+    mv(today - 125 * DAY + 10 * 3600e3, 'nuovo', qty, 0, qty, { noRng: true, lot: lots[0]?.lot, exp: lots[0]?.exp });
     let pending = null;
 
     const restock = (dayTs) => {
@@ -242,5 +234,5 @@ export function buildDemo({ now, users, categories, suppliers, uid }) {
     if (f && s.freeShip == null) s.freeShip = f;
   }
 
-  return { products, movements, orders, suppliers: extraSuppliers, categoryResp };
+  return { products, movements, orders, suppliers: extraSuppliers };
 }

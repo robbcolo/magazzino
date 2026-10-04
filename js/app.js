@@ -1,7 +1,8 @@
 import { html, render, useEffect, useState } from '../vendor/preact-htm.js';
-import { S, load, subscribe, derived, me, logout, ping, checkLock, emit } from './store.js';
-import { U, Icon, Avatar, navigate, SheetHost, ToastHost, DialogHost, closeAllSheets } from './ui.js';
-import { BrandMark, LockScreen, Onboarding } from './screens/lock.js';
+import { S, boot, subscribe, derived, emit } from './store.js';
+import * as store from './store.js';
+import { U, Icon, navigate, SheetHost, ToastHost, DialogHost, openSheet, closeAllSheets } from './ui.js';
+import { BrandMark, ConfigScreen, LoginScreen, LoadingScreen, Onboarding } from './screens/auth.js';
 import { Home } from './screens/home.js';
 import { Magazzino } from './screens/magazzino.js';
 import { Ordini } from './screens/ordini.js';
@@ -9,6 +10,7 @@ import { Scansiona, handleCodes } from './screens/scansiona.js';
 import { Fornitori } from './screens/fornitori.js';
 import { Attivita } from './screens/attivita.js';
 import { Impostazioni } from './screens/impostazioni.js';
+import { syncInfo } from './shared.js';
 import './sheets/product.js';
 import './sheets/orders.js';
 import './sheets/misc.js';
@@ -16,9 +18,16 @@ import { warmUp, stopAllCameras } from './scanner.js';
 
 const SCREENS = { home: Home, magazzino: Magazzino, ordini: Ordini, scansiona: Scansiona, fornitori: Fornitori, attivita: Attivita, impostazioni: Impostazioni };
 
+function SyncCard() {
+  const s = syncInfo();
+  return html`<button class=${`sync-card sync-${s.tone}`} onClick=${() => navigate('impostazioni')} aria-label=${`${s.title}. ${s.text}`}>
+    <${Icon} n=${s.icon} s="24" />
+    <span class="sync-text"><b>${s.title}</b><span>${s.text}</span></span>
+  </button>`;
+}
+
 function Nav() {
   const d = derived();
-  const u = me();
   const items = [
     { r: 'home', l: 'Oggi', i: 'home' },
     { r: 'magazzino', l: 'Magazzino', i: 'building-warehouse' },
@@ -27,22 +36,17 @@ function Nav() {
     { r: 'attivita', l: 'Attività', i: 'history' },
     { r: 'impostazioni', l: 'Impostazioni', i: 'settings' },
   ];
+  const item = (it) => html`<button class=${`nav-item ${U.route === it.r ? 'on' : ''}`} onClick=${() => navigate(it.r)} aria-current=${U.route === it.r ? 'page' : null}>
+    <${Icon} n=${it.i} s="24" /><span>${it.l}</span>${it.badge ? html`<span class="nav-badge">${it.badge}</span>` : null}
+  </button>`;
   return html`
     <nav class="sidebar" aria-label="Sezioni">
       <div class="brand"><${BrandMark} /><div class="brand-text"><b>Magazzino</b><span>${S.settings.studioName}</span></div></div>
-      ${items.slice(0, 3).map((it) => html`<button class=${`nav-item ${U.route === it.r ? 'on' : ''}`} onClick=${() => navigate(it.r)} aria-current=${U.route === it.r ? 'page' : null}>
-        <${Icon} n=${it.i} s="24" /><span>${it.l}</span>${it.badge ? html`<span class="nav-badge">${it.badge}</span>` : null}
-      </button>`)}
+      ${items.slice(0, 3).map(item)}
       <button class=${`nav-item nav-scan ${U.route === 'scansiona' ? 'on' : ''}`} onClick=${() => navigate('scansiona')}><${Icon} n="scan" s="24" /><span>Scansiona</span></button>
-      ${items.slice(3).map((it) => html`<button class=${`nav-item ${U.route === it.r ? 'on' : ''}`} onClick=${() => navigate(it.r)} aria-current=${U.route === it.r ? 'page' : null}>
-        <${Icon} n=${it.i} s="24" /><span>${it.l}</span>
-      </button>`)}
+      ${items.slice(3).map(item)}
       <div class="sidebar-spacer"></div>
-      <button class="me-card" onClick=${logout} aria-label="Cambia utente">
-        <${Avatar} u=${u} size=${40} />
-        <span class="me-text"><b>${u?.name}</b><span>Cambia utente</span></span>
-        <${Icon} n="switch-horizontal" s="20" />
-      </button>
+      <${SyncCard} />
     </nav>
     <nav class="tabbar" aria-label="Sezioni">
       ${[
@@ -77,12 +81,14 @@ function App() {
   const [, force] = useState(0);
   useEffect(() => {
     const off = subscribe(() => force((x) => x + 1));
-    force((x) => x + 1); // i dati potrebbero essere già pronti prima della sottoscrizione
+    force((x) => x + 1); // lo stato potrebbe essere cambiato prima della sottoscrizione
     return off;
   }, []);
-  if (!S.ready) return null;
-  if (!S.settings.setupDone || !S.users.length) return html`<${Onboarding} /><${ToastHost} />`;
-  if (!S.session.userId || !me()) return html`<${LockScreen} /><${ToastHost} /><${UpdateBar} />`;
+  const extras = html`<${ToastHost} /><${UpdateBar} />`;
+  if (S.phase === 'config') return html`<${ConfigScreen} />${extras}`;
+  if (S.phase === 'login') return html`<${LoginScreen} />${extras}`;
+  if (S.phase !== 'ready') return html`<${LoadingScreen} />${extras}`;
+  if (!S.settingsExists || !S.settings.setupDone) return html`<${Onboarding} />${extras}`;
   const Screen = SCREENS[U.route] || Home;
   return html`
     <div class="app">
@@ -91,30 +97,28 @@ function App() {
     </div>
     <${SheetHost} />
     <${DialogHost} />
-    <${ToastHost} />
-    <${UpdateBar} />`;
+    ${extras}`;
 }
 
 // ---------- Avvio ----------
+window.__magazzino = store; // per assistenza e test dalla console
+window.__magazzinoUI = { openSheet, closeAllSheets, navigate };
 render(html`<${App} />`, document.getElementById('app'));
-load().then(() => { setTimeout(warmUp, 1500); });
+boot();
+setTimeout(warmUp, 2000);
 
-// Attività dell'utente: rimanda il blocco automatico
-['pointerdown', 'keydown'].forEach((ev) => window.addEventListener(ev, ping, { passive: true, capture: true }));
-setInterval(() => { if (checkLock()) { closeAllSheets(); stopAllCameras(); } }, 15000);
+window.addEventListener('online', emit);
+window.addEventListener('offline', emit);
+setInterval(emit, 60000); // aggiorna orari relativi e stato di sincronizzazione
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    if (checkLock()) closeAllSheets();
-    emit(); // aggiorna stati legati alla data (es. nuovo giorno)
-  } else {
-    stopAllCameras();
-  }
+  if (document.hidden) stopAllCameras();
+  else emit(); // aggiorna stati legati alla data (es. nuovo giorno)
 });
 
 // Lettore di codici Bluetooth / USB (si comporta come una tastiera velocissima)
 let buf = '', lastKey = 0, gaps = [];
 window.addEventListener('keydown', (e) => {
-  if (!S.session.userId) return;
+  if (S.phase !== 'ready') return;
   const t = e.target;
   const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
   const now = performance.now();

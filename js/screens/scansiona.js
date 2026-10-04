@@ -1,7 +1,7 @@
 import { html, useEffect, useRef, useState } from '../../vendor/preact-htm.js';
 import { S, product, productByCode, emit } from '../store.js';
 import { Icon, Segmented, U, openSheet, toast, beep, haptic, navigate, readFile, relTime, Thumb, closeSheet } from '../ui.js';
-import { MeMini } from '../shared.js';
+import { SyncPill } from '../shared.js';
 import { parseCode, mergeCodes, describeCode } from '../codes.js';
 import { Scanner, cameraSupported, decodeImage } from '../scanner.js';
 import { matches } from '../logic.js';
@@ -145,7 +145,7 @@ export function Scansiona() {
         <h1>Scansiona</h1>
         <p class="sub">Scegli cosa stai facendo, poi inquadra la confezione.</p>
       </div>
-      <${MeMini} />
+      <${SyncPill} />
     </header>
     <${Segmented} cls="full" value=${U.scanMode} onChange=${(v) => { U.scanMode = v; emit(); }} options=${[
       { v: 'prendo', l: 'Prendo', icon: 'minus' },

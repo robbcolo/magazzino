@@ -1,11 +1,11 @@
 import { html, useState, useEffect, render } from '../../vendor/preact-htm.js';
 import qrcode from '../../vendor/qrcode.js';
 import {
-  S, product, supplier, user, category, me, isAdmin, saveSupplier, deleteSupplier, saveUser, deleteUser, saveCategory,
-  deleteCategory, pinHash, linkCode, stockMove, CSV_COLUMNS, parseCSV, planCSV, applyCSV,
+  S, product, supplier, category, saveSupplier, deleteSupplier, saveCategory,
+  deleteCategory, linkCode, stockMove, CSV_COLUMNS, parseCSV, planCSV, applyCSV,
 } from '../store.js';
 import {
-  SHEETS, Sheet, Icon, Avatar, AVATAR_COLORS, CatBadge, Thumb, Field, Segmented, Empty, NumberInput, openSheet, toast,
+  SHEETS, Sheet, Icon, CatBadge, Thumb, Field, Segmented, Empty, NumberInput, openSheet, toast,
   confirmDialog, haptic, fmtQty, plural, U, readFile, shareOrDownload, unitFor,
 } from '../ui.js';
 import { CameraView, handleCodes } from '../screens/scansiona.js';
@@ -13,18 +13,23 @@ import { parseCode, mergeCodes, describeCode } from '../codes.js';
 import { matches, norm } from '../logic.js';
 
 // ---------------- Fornitore ----------------
-function SupplierEditSheet({ id, close }) {
+function SupplierEditSheet({ id, close, onSaved }) {
   const ex = id ? supplier(id) : null;
   const [f, setF] = useState(() => (ex ? { ...ex } : { name: '', agent: '', phone: '', whatsapp: '', email: '', web: '', searchUrl: '', leadDays: 3, freeShip: null, note: '' }));
   const set = (p) => setF((x) => ({ ...x, ...p }));
-  const save = () => { saveSupplier({ ...f, name: f.name.trim() }); close(); toast(ex ? 'Fornitore salvato' : `${f.name.trim()} aggiunto`); };
+  const save = () => {
+    const saved = saveSupplier({ ...f, name: f.name.trim() });
+    close();
+    onSaved?.(saved);
+    toast(ex ? 'Fornitore salvato' : `${saved.name} aggiunto ai fornitori`, { icon: 'circle-check' });
+  };
   const del = async () => {
     const n = S.products.filter((p) => p.supplierId === id).length;
     if (!await confirmDialog({ title: `Eliminare ${ex.name}?`, text: n ? `${plural(n, 'materiale resterà', 'materiali resteranno')} senza fornitore principale.` : 'Il fornitore verrà rimosso.', ok: 'Elimina', danger: true })) return;
     deleteSupplier(id); close();
   };
   return html`<${Sheet} title=${ex ? ex.name : 'Nuovo fornitore'} close=${close} wide
-    footer=${html`${ex && isAdmin() && html`<button class="btn soft-danger" onClick=${del}><${Icon} n="trash" s="20" />Elimina</button>`}<span class="grow"></span><button class="btn ghost" onClick=${close}>Annulla</button><button class="btn primary" disabled=${!f.name.trim()} onClick=${save}><${Icon} n="check" s="20" />Salva</button>`}>
+    footer=${html`${ex && html`<button class="btn soft-danger" onClick=${del}><${Icon} n="trash" s="20" />Elimina</button>`}<span class="grow"></span><button class="btn ghost" onClick=${close}>Annulla</button><button class="btn primary" disabled=${!f.name.trim()} onClick=${save}><${Icon} n="check" s="20" />Salva</button>`}>
     <div class="form">
       <div class="form-grid">
         <${Field} label="Nome"><input class="input" value=${f.name} onInput=${(e) => set({ name: e.target.value })} placeholder="Es. Dontalia" /></${Field}>
@@ -44,59 +49,12 @@ function SupplierEditSheet({ id, close }) {
   </${Sheet}>`;
 }
 
-// ---------------- Persona ----------------
-function UserEditSheet({ id, close }) {
-  const ex = id ? user(id) : null;
-  const [f, setF] = useState(() => (ex ? { ...ex } : { name: '', fullName: '', role: 'assistente', color: AVATAR_COLORS[S.users.length % AVATAR_COLORS.length], pin: null }));
-  const set = (p) => setF((x) => ({ ...x, ...p }));
-  const admins = S.users.filter((u) => u.role === 'admin');
-  const lastAdmin = ex?.role === 'admin' && admins.length === 1;
-  const save = () => {
-    if (lastAdmin && f.role !== 'admin') { toast('Serve almeno un dottore con tutti i permessi.'); return; }
-    saveUser({ ...f, name: f.name.trim() }); close(); toast('Salvato');
-  };
-  const del = async () => {
-    if (ex.id === me()?.id) { toast('Non puoi eliminare il profilo che stai usando.'); return; }
-    if (lastAdmin) { toast('Serve almeno un dottore con tutti i permessi.'); return; }
-    if (!await confirmDialog({ title: `Eliminare ${ex.name}?`, text: 'Le sue attività passate restano nello storico.', ok: 'Elimina', danger: true })) return;
-    deleteUser(ex.id); close();
-  };
-  return html`<${Sheet} title=${ex ? ex.name : 'Nuova persona'} close=${close}
-    footer=${html`${ex && html`<button class="btn soft-danger" onClick=${del}><${Icon} n="trash" s="20" />Elimina</button>`}<span class="grow"></span><button class="btn primary" disabled=${!f.name.trim()} onClick=${save}><${Icon} n="check" s="20" />Salva</button>`}>
-    <div class="form">
-      <div style="display:flex;justify-content:center;margin:6px 0"><${Avatar} u=${{ ...f, name: f.name || '?' }} size=${84} /></div>
-      <${Field} label="Colore"><div class="pick-grid">${AVATAR_COLORS.map((c) => html`<button type="button" class=${`pick ${f.color === c ? 'on' : ''}`} onClick=${() => set({ color: c })} aria-label=${c} style="padding:0 10px"><span class=${`avatar av-${c}`} style="width:26px;height:26px"></span></button>`)}</div></${Field}>
-      <${Field} label="Nome che compare nell'app"><input class="input" value=${f.name} onInput=${(e) => set({ name: e.target.value })} /></${Field}>
-      <${Field} label="Nome per firmare gli ordini" hint="Es. Dott. Roberto Colombo"><input class="input" value=${f.fullName || ''} onInput=${(e) => set({ fullName: e.target.value })} /></${Field}>
-      <${Field} label="Ruolo" hint="I dottori possono modificare persone, categorie, impostazioni ed eliminare schede.">
-        <${Segmented} cls="full" value=${f.role} onChange=${(v) => set({ role: v })} options=${[{ v: 'admin', l: 'Dottore' }, { v: 'assistente', l: 'Assistente' }]} />
-      </${Field}>
-      ${ex && html`<button type="button" class="btn ghost" onClick=${() => openSheet('pinSet', { userId: ex.id })}><${Icon} n="lock" s="20" />${ex.pin ? 'Cambia o togli il PIN' : 'Imposta un PIN'}</button>`}
-    </div>
-  </${Sheet}>`;
-}
-
-function PinSetSheet({ userId, close }) {
-  const u = user(userId);
-  const [a, setA] = useState('');
-  const [b, setB] = useState('');
-  const ok = /^\d{4}$/.test(a) && a === b;
-  return html`<${Sheet} title=${`PIN di ${u?.name}`} sub="4 cifre, da inserire quando si sceglie questo profilo." close=${close}
-    footer=${html`${u?.pin && html`<button class="btn soft-danger" onClick=${() => { saveUser({ id: userId, pin: null }); close(); toast('PIN tolto'); }}>Togli il PIN</button>`}<span class="grow"></span><button class="btn primary" disabled=${!ok} onClick=${() => { saveUser({ id: userId, pin: pinHash(userId, a) }); close(); toast('PIN impostato'); }}>Salva PIN</button>`}>
-    <div class="form-grid">
-      <${Field} label="Nuovo PIN"><input class="input num" type="password" inputmode="numeric" maxlength="4" value=${a} onInput=${(e) => setA(e.target.value.replace(/\D/g, ''))} autocomplete="new-password" /></${Field}>
-      <${Field} label="Ripeti il PIN"><input class="input num" type="password" inputmode="numeric" maxlength="4" value=${b} onInput=${(e) => setB(e.target.value.replace(/\D/g, ''))} autocomplete="new-password" /></${Field}>
-    </div>
-    ${b.length === 4 && a !== b && html`<p class="warn-text" style="margin-top:10px">I due PIN non coincidono.</p>`}
-  </${Sheet}>`;
-}
-
 // ---------------- Categoria ----------------
 const EMOJIS = ['🦷', '🪥', '💉', '💊', '🧤', '😷', '✂️', '🔩', '👑', '🧪', '🩻', '🧼', '🫧', '📎', '🪡', '🩹', '🧴', '🧻', '📦', '🔬', '🦴', '🧲', '⚙️', '🧯', '🧽', '🪒', '🔦', '🖨️', '😁', '🫙'];
 const CAT_COLORS = ['sky', 'lilac', 'sand', 'slate', 'rose', 'mint', 'peach', 'coral', 'aqua', 'leaf', 'lemon', 'grape', 'stone'];
 function CategoryEditSheet({ id, close }) {
   const ex = id ? category(id) : null;
-  const [f, setF] = useState(() => (ex ? { ...ex } : { name: '', emoji: '📦', color: 'sky', respId: null }));
+  const [f, setF] = useState(() => (ex ? { ...ex } : { name: '', emoji: '📦', color: 'sky' }));
   const set = (p) => setF((x) => ({ ...x, ...p }));
   const n = ex ? S.products.filter((p) => p.catId === ex.id).length : 0;
   const del = async () => {
@@ -110,12 +68,7 @@ function CategoryEditSheet({ id, close }) {
       <div style="display:flex;gap:14px;align-items:center"><${CatBadge} cat=${f} size=${64} /><input class="input" value=${f.name} onInput=${(e) => set({ name: e.target.value })} placeholder="Nome della categoria" style="flex:1" /></div>
       <${Field} label="Icona"><div class="pick-grid">${EMOJIS.map((e) => html`<button type="button" class=${`pick ${f.emoji === e ? 'on' : ''}`} onClick=${() => set({ emoji: e })} style="padding:0 10px"><span class="em">${e}</span></button>`)}</div></${Field}>
       <${Field} label="Colore"><div class="pick-grid">${CAT_COLORS.map((c) => html`<button type="button" class=${`pick ${f.color === c ? 'on' : ''}`} onClick=${() => set({ color: c })} style="padding:0 8px" aria-label=${c}><span class=${`cat-badge cat-${c}`} style="width:28px;height:28px;border-radius:8px;background:var(--c)"></span></button>`)}</div></${Field}>
-      <${Field} label="Chi ordina i materiali di questa categoria" hint="Si può cambiare per il singolo materiale nella sua scheda.">
-        <select class="input" value=${f.respId || ''} onChange=${(e) => set({ respId: e.target.value || null })}>
-          <option value="">Nessuno</option>
-          ${S.users.map((u) => html`<option value=${u.id}>${u.name}</option>`)}
-        </select>
-      </${Field}>
+
     </div>
   </${Sheet}>`;
 }
@@ -313,6 +266,6 @@ function CsvImportSheet({ close }) {
 }
 
 Object.assign(SHEETS, {
-  supplierEdit: SupplierEditSheet, userEdit: UserEditSheet, pinSet: PinSetSheet, categoryEdit: CategoryEditSheet,
+  supplierEdit: SupplierEditSheet, categoryEdit: CategoryEditSheet,
   scanCode: ScanCodeSheet, unknownCode: UnknownCodeSheet, inventory: InventorySheet, labels: LabelsSheet, csvImport: CsvImportSheet,
 });

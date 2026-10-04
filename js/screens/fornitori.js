@@ -1,7 +1,7 @@
 import { html } from '../../vendor/preact-htm.js';
-import { S, derived, isAdmin } from '../store.js';
+import { S, derived } from '../store.js';
 import { Icon, Empty, openSheet, plural, fmtEuro } from '../ui.js';
-import { SupplierContacts, MeMini } from '../shared.js';
+import { SupplierContacts, SyncPill } from '../shared.js';
 
 export function Fornitori() {
   const d = derived();
@@ -10,11 +10,11 @@ export function Fornitori() {
     <header class="page-head">
       <div class="grow">
         <h1>Fornitori</h1>
-        <p class="sub">Contatti, tempi di consegna e soglie per la spedizione gratuita.</p>
+        <p class="sub">Tocca un fornitore per cambiarne nome, contatti, tempi di consegna e spedizione gratuita.</p>
       </div>
       <div class="head-actions">
         <button class="btn primary" onClick=${() => openSheet('supplierEdit', {})}><${Icon} n="plus" s="20" sw="2.4" />Nuovo fornitore</button>
-        <${MeMini} />
+        <${SyncPill} />
       </div>
     </header>
     ${!list.length

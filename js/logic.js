@@ -272,7 +272,7 @@ export function buildOrderList({ products, suppliers, derived, list, now }) {
 }
 
 // ---------- Testo dell'ordine ----------
-export function orderText({ supplier, items, settings, user }) {
+export function orderText({ supplier, items, settings }) {
   const lines = [];
   lines.push(`Buongiorno${supplier?.agent ? ' ' + supplier.agent : ''},`);
   lines.push(`vorrei ordinare per ${settings.studioName || 'lo studio'}:`);
@@ -286,7 +286,7 @@ export function orderText({ supplier, items, settings, user }) {
   lines.push('');
   if (settings.address) { lines.push(`Consegna: ${settings.address}`); lines.push(''); }
   lines.push('Grazie,');
-  lines.push(user?.fullName || user?.name || '');
+  if (settings.signature) lines.push(settings.signature);
   lines.push(settings.studioName || '');
   return lines.join('\n').trim();
 }

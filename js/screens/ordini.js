@@ -1,10 +1,10 @@
 import { html } from '../../vendor/preact-htm.js';
-import { S, derived, me, respFor, user, supplier, listSet, listRemove, listAdd, listRestore, emit } from '../store.js';
+import { S, derived, supplier, listSet, listRemove, listAdd, listRestore, emit } from '../store.js';
 import {
-  Icon, Avatar, StatusChip, Thumb, Segmented, Stepper, Empty, U, openSheet, toast, fmtEuro, fmtQty, fmtN, fmtDate, relDay,
+  Icon, StatusChip, Thumb, Segmented, Stepper, Empty, U, openSheet, toast, fmtEuro, fmtQty, fmtN, fmtDate, relDay,
   unitFor, plural, Bars, haptic,
 } from '../ui.js';
-import { SupplierContacts, MeMini } from '../shared.js';
+import { SupplierContacts, SyncPill } from '../shared.js';
 import { startOfDay, DAY, priceFor } from '../logic.js';
 
 export function Ordini() {
@@ -18,7 +18,7 @@ export function Ordini() {
         <h1>Ordini</h1>
         <p class="sub">${d.toOrder ? `${plural(d.toOrder, 'materiale', 'materiali')} da ordinare` : 'Niente da ordinare adesso'}${d.open.length ? `, ${plural(d.open.length, 'ordine', 'ordini')} in arrivo` : ''}</p>
       </div>
-      <${MeMini} />
+      <${SyncPill} />
     </header>
     <${Segmented} value=${t} onChange=${setTab} options=${[
       { v: 'lista', l: 'Da ordinare', icon: 'shopping-cart', badge: d.toOrder || null },
@@ -37,22 +37,14 @@ export function Ordini() {
 
 function DaOrdinare() {
   const d = derived();
-  const u = me();
-  const mine = U.ord.mine;
-  const groups = d.groups
-    .map((g) => ({ ...g, items: mine ? g.items.filter((it) => respFor(it.p) === u?.id) : g.items }))
-    .filter((g) => g.items.length);
+  const groups = d.groups.filter((g) => g.items.length);
   const extrasOnly = d.groups.filter((g) => !g.items.length && g.extra.length);
   return html`
-    <div class="filters" style="margin:0 0 14px">
-      <button class=${`fchip ${!mine ? 'on' : ''}`} onClick=${() => { U.ord = { ...U.ord, mine: false }; emit(); }}>Tutti</button>
-      <button class=${`fchip ${mine ? 'on' : ''}`} onClick=${() => { U.ord = { ...U.ord, mine: true }; emit(); }}><${Avatar} u=${u} size=${20} />Solo quelli che ordino io</button>
-    </div>
     ${groups.length
       ? groups.map((g) => html`<${OrderGroup} key=${g.supplierId || 'none'} g=${g} />`)
-      : html`<div class="group"><${Empty} emoji="✅" title=${mine ? 'Niente da ordinare per te' : 'Tutto sotto controllo'}
+      : html`<div class="group"><${Empty} emoji="✅" title="Tutto sotto controllo"
           text="Quando un materiale scende sotto la soglia compare qui, già diviso per fornitore e con la quantità consigliata." /></div>`}
-    ${!mine && extrasOnly.length > 0 && html`<div class="section">
+    ${extrasOnly.length > 0 && html`<div class="section">
       <div class="section-head"><h2>In esaurimento, da altri fornitori</h2></div>
       <div class="group">
         ${extrasOnly.flatMap((g) => g.extra.map((x) => html`<div class="row has-lead" key=${x.p.id}>
@@ -98,7 +90,6 @@ function OrderGroup({ g }) {
 
 function OrderItem({ it }) {
   const { p, d } = it;
-  const resp = user(respFor(p));
   const packName = p.packSize > 1 ? (p.packLabel || 'confezioni') : unitFor(p.unit, it.packs);
   return html`<div class="og-item">
     <span onClick=${() => openSheet('product', { id: p.id })} style="cursor:pointer"><${Thumb} p=${p} size=${48} /></span>
@@ -107,7 +98,6 @@ function OrderItem({ it }) {
       <div class="row-sub">${d.qty === 1 ? 'Ne resta' : 'Ne restano'} ${fmtQty(d.qty, p.unit)}${p.min ? ` (soglia ${fmtN(p.min)})` : ''}${p.packSize > 1 ? `, ${p.packLabel || 'confezione'} da ${p.packSize}` : ''}</div>
       <div class="prow-chips">
         ${it.manual ? html`<span class="chip sm neutral"><${Icon} n="hand-grab" s="14" />Aggiunto a mano</span>` : html`<${StatusChip} status=${d.status} small />`}
-        ${resp && html`<span class="chip sm neutral"><${Avatar} u=${resp} size=${16} />Ordina ${resp.name}</span>`}
       </div>
     </div>
     <div class="og-controls">
@@ -130,12 +120,11 @@ function InArrivo() {
   if (!open.length) return html`<div class="group"><${Empty} emoji="🚚" title="Nessun ordine in arrivo" text="Quando segni un ordine come inviato, lo trovi qui finché non registri l'arrivo della merce." /></div>`;
   return open.map((o) => {
     const late = o.expectedAt && o.expectedAt < today;
-    const by = user(o.orderedBy);
     return html`<article class="oc" key=${o.id}>
       <div class="oc-head">
         <div class="grow">
           <h3 style="font-size:19px">${o.supplierName}</h3>
-          <div class="row-sub" style="display:flex;align-items:center;gap:6px;margin-top:4px"><${Avatar} u=${by} size=${20} />Ordinato da ${by?.name || '—'} ${relDay(o.createdAt)}</div>
+          <div class="row-sub" style="margin-top:4px">Ordinato ${relDay(o.createdAt)}</div>
         </div>
         ${o.status === 'parziale' && html`<span class="chip st-basso"><${Icon} n="package-import" s="16" />Arrivato in parte</span>`}
         ${late ? html`<span class="chip st-ordinare"><${Icon} n="clock" s="16" />In ritardo, previsto ${relDay(o.expectedAt)}</span>`
@@ -168,7 +157,7 @@ function Storico({ orders }) {
       ${list.map((o) => html`<button class="row" key=${o.id} onClick=${() => openSheet('orderView', { orderId: o.id })}>
         <div class="row-main">
           <div class="row-title">${o.supplierName}</div>
-          <div class="row-sub">${fmtDate(o.createdAt, { day: 'numeric', month: 'long' })}, ${plural(o.items.length, 'articolo', 'articoli')}, ordinato da ${user(o.orderedBy)?.name || '—'}</div>
+          <div class="row-sub">${fmtDate(o.createdAt, { day: 'numeric', month: 'long' })}, ${plural(o.items.length, 'articolo', 'articoli')}</div>
         </div>
         <span class="row-end">
           ${o.status === 'annullato' ? html`<span class="chip sm neutral">Annullato</span>` : html`<span class="tnum" style="color:var(--ink)">${fmtEuro(o.total)}</span>`}

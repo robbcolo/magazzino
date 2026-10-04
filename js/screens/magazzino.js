@@ -1,7 +1,7 @@
 import { html } from '../../vendor/preact-htm.js';
-import { S, derived, category, me, respFor, emit } from '../store.js';
+import { S, derived, category, emit } from '../store.js';
 import { Icon, Empty, U, openSheet, CatBadge, plural } from '../ui.js';
-import { ProductRow, MeMini } from '../shared.js';
+import { ProductRow, SyncPill } from '../shared.js';
 import { STATUS, matches, norm } from '../logic.js';
 
 const FILTERS = [
@@ -17,9 +17,8 @@ export function Magazzino() {
   const d = derived();
   const f = U.mag;
   const set = (patch) => { U.mag = { ...U.mag, ...patch }; emit(); };
-  const u = me();
 
-  const base = S.products.filter((p) => (!f.mine || respFor(p) === u?.id) && (!f.loc || norm(p.location).startsWith(norm(f.loc))));
+  const base = S.products.filter((p) => !f.loc || norm(p.location).startsWith(norm(f.loc)));
   const searched = base.filter((p) => matches(p, f.q, `${category(p.catId)?.name || ''} ${(p.codes || []).join(' ')}`));
   const filterDef = FILTERS.find((x) => x.v === f.status) || FILTERS[0];
   const byStatus = filterDef.test ? searched.filter((p) => filterDef.test(d.map.get(p.id))) : searched;
@@ -55,7 +54,7 @@ export function Magazzino() {
       <div class="head-actions">
         <button class="btn ghost" onClick=${() => openSheet('inventory')}><${Icon} n="clipboard-check" s="20" />Inventario</button>
         <button class="btn primary" onClick=${() => openSheet('productEdit', {})}><${Icon} n="plus" s="20" sw="2.4" />Nuovo materiale</button>
-        <${MeMini} />
+        <${SyncPill} />
       </div>
     </header>
 
@@ -80,7 +79,6 @@ export function Magazzino() {
           ${x.dot && html`<i class="dot" style=${{ background: x.dot }}></i>`}${x.l} <span class="count">${n}</span>
         </button>`;
       })}
-      <button class=${`fchip ${f.mine ? 'on' : ''}`} onClick=${() => set({ mine: !f.mine })}><${Icon} n="user" s="16" />Ordino io</button>
       ${f.loc && html`<button class="fchip on" onClick=${() => set({ loc: null })}><${Icon} n="map-pin" s="16" />${f.loc}<${Icon} n="x" s="16" /></button>`}
     </div>
     <div class="filters" role="group" aria-label="Filtra per categoria" style="margin-top:4px">
@@ -95,7 +93,7 @@ export function Magazzino() {
         ? html`<div class="group"><${Empty} emoji="📦" title="Il magazzino è vuoto" text="Aggiungi i materiali uno alla volta, inquadrando il codice a barre, oppure importali tutti insieme da un file CSV in Impostazioni."
             action=${html`<div class="btn-row" style="justify-content:center"><button class="btn primary" onClick=${() => openSheet('productEdit', {})}><${Icon} n="plus" s="20" />Aggiungi il primo materiale</button></div>`} /></div>`
         : !groups.length
-          ? html`<div class="group"><${Empty} emoji="🔍" title="Nessun materiale trovato" text="Prova a cambiare la ricerca o i filtri." action=${html`<button class="btn" onClick=${() => set({ q: '', status: 'all', cat: 'all', loc: null, mine: false })}>Mostra tutto</button>`} /></div>`
+          ? html`<div class="group"><${Empty} emoji="🔍" title="Nessun materiale trovato" text="Prova a cambiare la ricerca o i filtri." action=${html`<button class="btn" onClick=${() => set({ q: '', status: 'all', cat: 'all', loc: null })}>Mostra tutto</button>`} /></div>`
           : groups.map((g) => html`<div key=${g.key}>
               ${g.title && html`<div class="cat-sep">${g.title}</div>`}
               <div class="plist">${g.items.map((p) => html`<${ProductRow} key=${p.id} p=${p} />`)}</div>

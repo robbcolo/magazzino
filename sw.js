@@ -1,8 +1,9 @@
 // Service worker: rende l'app disponibile anche senza internet.
 // Generato automaticamente: la versione cambia quando cambia un file dell'app.
-const VERSION = 'magazzino-65098962d4';
+const VERSION = 'magazzino-e02bbec003';
 const FILES = [
   "./",
+  "./config.js",
   "./css/app.css",
   "./icons/apple-touch-icon.png",
   "./icons/icon-192.png",
@@ -10,17 +11,17 @@ const FILES = [
   "./icons/icon-maskable-512.png",
   "./index.html",
   "./js/app.js",
+  "./js/cloud.js",
   "./js/codes.js",
-  "./js/db.js",
   "./js/demo.js",
   "./js/icons.js",
   "./js/logic.js",
   "./js/scanner.js",
   "./js/screens/attivita.js",
+  "./js/screens/auth.js",
   "./js/screens/fornitori.js",
   "./js/screens/home.js",
   "./js/screens/impostazioni.js",
-  "./js/screens/lock.js",
   "./js/screens/magazzino.js",
   "./js/screens/ordini.js",
   "./js/screens/scansiona.js",
@@ -31,6 +32,7 @@ const FILES = [
   "./js/store.js",
   "./js/ui.js",
   "./manifest.webmanifest",
+  "./vendor/firebase.js",
   "./vendor/preact-htm.js",
   "./vendor/qrcode.js",
   "./vendor/zxing-reader.js",
@@ -55,6 +57,11 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   e.respondWith((async () => {
     const cache = await caches.open(VERSION);
+    // la configurazione di Firebase si può cambiare su GitHub: prima la rete, poi la copia
+    if (new URL(req.url).pathname.endsWith('/config.js')) {
+      try { const res = await fetch(req, { cache: 'no-store' }); if (res.ok) { cache.put(req, res.clone()); return res; } } catch (err) { /* offline */ }
+      return (await cache.match(req, { ignoreSearch: true })) || new Response('window.MAGAZZINO_FIREBASE = null;', { headers: { 'Content-Type': 'text/javascript' } });
+    }
     const hit = await cache.match(req, { ignoreSearch: true });
     if (hit) return hit;
     try {
