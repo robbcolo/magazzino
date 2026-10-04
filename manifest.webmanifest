@@ -1,0 +1,17 @@
+{
+  "name": "Magazzino dello studio",
+  "short_name": "Magazzino",
+  "description": "Scorte, scadenze e ordini del materiale dello studio dentistico.",
+  "lang": "it",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ECF2F1",
+  "theme_color": "#ECF2F1",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
